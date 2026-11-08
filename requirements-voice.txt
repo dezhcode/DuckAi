@@ -1,0 +1,5 @@
+# Optional voice features (dictation + live voice chat)
+numpy
+sounddevice
+av
+aiortc
