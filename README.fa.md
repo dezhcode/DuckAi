@@ -14,7 +14,7 @@
 - 🎨 **تولید تصویر** از توضیح متنی (خروجی JPEG)
 - 🎙️ **دیکته** — ضبط میکروفون یا هر فایل صوتی و گرفتن متن
 - 📞 **گفتگوی زنده صوتی** — تماس دوطرفهٔ واقعی WebRTC با هوش مصنوعی (مثل تماس تلفنی)
-- 🔀 **تغییر مدل** — `gpt-6-luna`، `gpt-5.6-luna`، `gpt-5.4-mini`، `gpt-5.4-nano`، `claude-haiku-4-5`، `mistral-small-2603`
+- 🔀 **تغییر مدل** — هر شش مدل رایگان فعلی: `gpt-6-luna`، `gpt-5.4-mini`، `claude-haiku-5-5`، `mistral-small-2603`، `tinfoil/gpt-oss-120b`، `tinfoil/gemma4-31b` (شناسه‌های قدیمی مثل `gpt-5.4-nano` و `claude-haiku-4-5` هنوز کار می‌کنند و سرور خودش به مدل جدید ارتقایشان می‌دهد)
 - 🌐 **پشتیبانی از پروکسی** (HTTP / SOCKS5)
 - 🌍 **رابط دوزبانه** — انگلیسی (پیش‌فرض) و فارسی (`--lang fa`)
 
@@ -126,9 +126,25 @@ python duck_cli.py --voice
 
 ```bash
 python duck_cli.py --ask "سلام" --model mini      # gpt-5.4-mini
-python duck_cli.py --ask "سلام" --model haiku     # claude-haiku-4-5
+python duck_cli.py --ask "سلام" --model haiku     # claude-haiku-5-5
 python duck_cli.py --ask "سلام" --model mistral   # mistral-small-2603
+python duck_cli.py --ask "سلام" --model oss       # tinfoil/gpt-oss-120b (متن‌باز)
+python duck_cli.py --ask "سلام" --model gemma     # tinfoil/gemma4-31b  (متن‌باز)
+python duck_cli.py --ask "سلام" --model luna      # gpt-6-luna (پیش‌فرض رایگان)
 ```
+
+**مدل‌های رایگان** (مطابق کانفیگ خود duck.ai — تست‌شده به‌صورت زنده):
+
+| میان‌بر | شناسه مدل | توضیح |
+|---|---|---|
+| `luna` | `gpt-6-luna` | پیش‌فرض سطح رایگان |
+| `mini` | `gpt-5.4-mini` | سریع‌تر، از سهمیه مصرف می‌گذرد |
+| `haiku` | `claude-haiku-5-5` | سریع‌تر، از سهمیه مصرف می‌گذرد |
+| `mistral` | `mistral-small-2603` | |
+| `oss` | `tinfoil/gpt-oss-120b` | متن‌باز ۱۲۰ میلیارد پارامتری |
+| `gemma` | `tinfoil/gemma4-31b` | متن‌باز Gemma 4 نسخه 31B |
+
+مدل‌های سطح پولی (`gpt-5.6-terra`، `claude-sonnet-5-5`، `claude-opus-5-5`، `gpt-5.6-sol`) بدون اشتراک با خطای `ERR_MODEL_RESTRICTED` از سمت سرور رد می‌شوند.
 
 ### پروکسی
 

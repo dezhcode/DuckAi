@@ -19,3 +19,8 @@ duckai_*.webp
 Thumbs.db
 .idea/
 .vscode/
+
+# Local HAR captures / debug dumps (may contain session cookies)
+download
+*.har
+bundle_search.txt

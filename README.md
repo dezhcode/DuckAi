@@ -12,7 +12,7 @@ A **free, unofficial command-line client for DuckDuckGo AI Chat (duck.ai)** — 
 - 🎨 **Generate images** from a text prompt (saved as JPEG)
 - 🎙️ **Dictation** — record your microphone or any audio file and get the transcript
 - 📞 **Live voice chat** — a real two-way WebRTC call with the AI (like a phone call)
-- 🔀 **Model switching** — `gpt-6-luna`, `gpt-5.6-luna`, `gpt-5.4-mini`, `gpt-5.4-nano`, `claude-haiku-4-5`, `mistral-small-2603`
+- 🔀 **Model switching** — all six current free models: `gpt-6-luna`, `gpt-5.4-mini`, `claude-haiku-5-5`, `mistral-small-2603`, `tinfoil/gpt-oss-120b`, `tinfoil/gemma4-31b` (legacy ids like `gpt-5.4-nano` / `claude-haiku-4-5` still work and are auto-upgraded by duck.ai)
 - 🌐 **Proxy support** (HTTP / SOCKS5)
 - 🌍 **Bilingual UI** — English (default) and Persian (`--lang fa`)
 
@@ -124,9 +124,25 @@ python duck_cli.py --voice
 
 ```bash
 python duck_cli.py --ask "hi" --model mini     # gpt-5.4-mini
-python duck_cli.py --ask "hi" --model haiku    # claude-haiku-4-5
+python duck_cli.py --ask "hi" --model haiku    # claude-haiku-5-5
 python duck_cli.py --ask "hi" --model mistral  # mistral-small-2603
+python duck_cli.py --ask "hi" --model oss      # tinfoil/gpt-oss-120b (open source)
+python duck_cli.py --ask "hi" --model gemma    # tinfoil/gemma4-31b  (open source)
+python duck_cli.py --ask "hi" --model luna     # gpt-6-luna (free default)
 ```
+
+**Free models** (mirrors duck.ai's own picker config, verified live):
+
+| Shortcut | Model ID | Notes |
+|---|---|---|
+| `luna` | `gpt-6-luna` | free-tier default |
+| `mini` | `gpt-5.4-mini` | faster, counts toward usage limits |
+| `haiku` | `claude-haiku-5-5` | faster, counts toward usage limits |
+| `mistral` | `mistral-small-2603` | |
+| `oss` | `tinfoil/gpt-oss-120b` | open-source 120B |
+| `gemma` | `tinfoil/gemma4-31b` | open-source Gemma 4 31B |
+
+Paid-tier models (`gpt-5.6-terra`, `claude-sonnet-5-5`, `claude-opus-5-5`, `gpt-5.6-sol`) are rejected by the server with `ERR_MODEL_RESTRICTED` unless you have a subscription.
 
 ### Proxy
 

@@ -22,8 +22,10 @@
 #   Python 3.10+   pip install -r requirements.txt
 #   Node.js on PATH +  npm install   (installs jsdom, in this folder)
 #
-# Models: gpt-6-luna (default), gpt-5.6-luna, gpt-5.4-mini, gpt-5.4-nano,
-#         claude-haiku-4-5, mistral-small-2603
+# Free models (duck.ai frontend config, Nov 2026): gpt-6-luna (default),
+#         gpt-5.4-mini, claude-haiku-5-5, mistral-small-2603,
+#         tinfoil/gpt-oss-120b, tinfoil/gemma4-31b
+# Legacy (auto-upgraded by duck.ai): gpt-5.6-luna, gpt-5.4-nano, claude-haiku-4-5
 #
 # Usage:
 #   python duck_cli.py                                     -> interactive menu
@@ -69,7 +71,7 @@ try:
 except ImportError:
     HAS_PIL = False
 
-__version__ = "2.1.0"
+__version__ = "2.2.0"
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _BASE = "https://duck.ai"
@@ -77,14 +79,36 @@ _BASE = "https://duck.ai"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 
+# Chat models. The free set mirrors duck.ai's own frontend config (checked Nov 2026):
+# these six models list the Free tier in their availableTo array:
+#   gpt-6-luna, gpt-5.4-mini, claude-haiku-5-5, mistral-small-2603,
+#   tinfoil/gpt-oss-120b, tinfoil/gemma4-31b
+# Legacy ids (gpt-5.6-luna, gpt-5.4-nano, claude-haiku-4-5) are still accepted —
+# duck.ai upgrades them to their replacement model.
 MODELS = {
-    "luna": "gpt-6-luna",
+    # ── current free models ──
+    "luna": "gpt-6-luna",           # free-tier default model
     "gpt-6-luna": "gpt-6-luna",
-    "gpt-5.6-luna": "gpt-5.6-luna",
-    "nano": "gpt-5.4-nano",
     "mini": "gpt-5.4-mini",
-    "haiku": "claude-haiku-4-5",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "haiku": "claude-haiku-5-5",
+    "claude-haiku-5-5": "claude-haiku-5-5",
     "mistral": "mistral-small-2603",
+    "mistral-small-2603": "mistral-small-2603",
+    "oss": "tinfoil/gpt-oss-120b",  # open-source 120B
+    "gemma": "tinfoil/gemma4-31b",  # open-source Gemma 4 31B
+    # ── legacy ids (still work, auto-upgraded by duck.ai) ──
+    "gpt-5.6-luna": "gpt-5.6-luna",          # -> upgraded to gpt-6-luna
+    "gpt-5.4-nano": "gpt-5.4-nano",          # -> upgraded to gpt-6-luna
+    "claude-haiku-4-5": "claude-haiku-4-5",  # -> upgraded to claude-haiku-5-5
+}
+
+_LEGACY_MODELS = {"gpt-5.6-luna", "gpt-5.4-nano", "claude-haiku-4-5"}
+
+# Some models reject reasoningEffort "none" (HTTP 400 ERR_BAD_REQUEST).
+# Per-model defaults; every other model uses "none".
+REASONING_EFFORT = {
+    "tinfoil/gpt-oss-120b": "low",
 }
 
 # Image limits (mirroring duck.ai browser behavior)
@@ -322,7 +346,7 @@ class DuckAI:
             "model": model,
             "messages": msgs,
             "canUseTools": tools,
-            "reasoningEffort": "none",
+            "reasoningEffort": REASONING_EFFORT.get(model, "none"),
             "canUseApproxLocation": None,
             "canDelegateImageGeneration": None,
             "canShowGreeting": False,
@@ -544,6 +568,8 @@ def choose_model(current: str | None = None) -> str:
         mark = ""
         if current and MODELS[k] == current:
             mark = _("  ← now")
+        if k in _LEGACY_MODELS:
+            mark += "  (legacy)"
         print("  {i}. {k:12} -> {m}{mark}".format(i=i, k=k, m=MODELS[k], mark=mark))
     while True:
         c = input(_("\nModel number (Enter = keep current): ")).strip()
@@ -739,7 +765,8 @@ def main():
     parser.add_argument("--draw", help=_("generate an image from a text prompt (non-interactive)"))
     parser.add_argument("--out", help=_("folder for generated images (default: current folder)"))
     parser.add_argument("--model", default=None,
-                        help=_("luna | mini | nano | haiku | mistral | gpt-6-luna | ..."))
+                        help=_("luna | mini | haiku | mistral | oss | gemma "
+                               "| gpt-6-luna | ..."))
     parser.add_argument("--proxy",
                         help=_("http://host:port or socks5://host:port (socks needs: "
                                "pip install 'requests[socks]')"))
