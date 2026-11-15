@@ -84,7 +84,7 @@ class StreamTests(unittest.TestCase):
         response.close.assert_called_once()
 
     def test_permanent_errors_and_rate_limits_are_not_replayed(self):
-        for status in (400, 401, 403, 429):
+        for status in (400, 401, 403, 418, 429):
             with self.subTest(status=status):
                 response = self.response(status=status)
                 with patch.object(self.client, 'chat', return_value=response) as chat:
@@ -93,6 +93,94 @@ class StreamTests(unittest.TestCase):
                 self.assertEqual(error.exception.status, status)
                 chat.assert_called_once()
                 response.close.assert_called_once()
+
+    def test_upstream_error_has_safe_stage_code_and_retry_after(self):
+        response = self.response(status=429)
+        response.headers = {'Retry-After': '120'}
+        response.json.return_value = {'type': 'ERR_LIMIT', 'message': 'private prompt and secret'}
+        with patch.object(self.client, 'chat', return_value=response), \
+             patch.object(self.client, 'rehandshake') as handshake, patch.object(duck.time, 'sleep') as sleep:
+            with self.assertRaises(duck.DuckAIError) as caught:
+                self.client.ask('hi', retries=4)
+        error = caught.exception
+        self.assertEqual((error.stage, error.provider_code, error.retry_after), ('chat', 'ERR_LIMIT', 120))
+        self.assertNotIn('private', str(error))
+        handshake.assert_not_called()
+        sleep.assert_not_called()
+
+    def test_challenge_endpoint_rejection_is_distinct_from_chat_rejection(self):
+        response = self.response(status=418)
+        response.headers = {}
+        response.json.return_value = {}
+        with patch.object(self.client.s, 'get', return_value=response):
+            with self.assertRaises(duck.DuckAIError) as caught:
+                self.client.fetch_challenge()
+        self.assertEqual(caught.exception.stage, 'status')
+        self.assertEqual(caught.exception.status, 418)
+        response.close.assert_called_once()
+
+    def test_bootstrap_rejection_is_closed_and_annotated(self):
+        response = self.response(status=403)
+        response.headers = {}
+        response.json.return_value = {}
+        with patch.object(self.client.s, 'get', return_value=response):
+            with self.assertRaises(duck.DuckAIError) as caught:
+                self.client.bootstrap()
+        self.assertEqual(caught.exception.stage, 'bootstrap')
+        response.close.assert_called_once()
+
+    def test_arbitrary_provider_text_is_not_used_as_a_diagnostic_code(self):
+        response = self.response(status=418)
+        response.headers = {'Retry-After': 'invalid'}
+        response.json.return_value = {'type': 'user prompt contains private data'}
+        error = duck.DuckAIError.from_response(response, 'chat')
+        self.assertIsNone(error.provider_code)
+        self.assertIsNone(error.retry_after)
+
+    def test_expired_reused_challenge_can_refresh_once(self):
+        failed = self.response(status=418)
+        failed.headers = {}
+        failed.json.return_value = {'type': 'ERR_CHALLENGE'}
+        success = self.response(lines=[b'data: {"message":"ok"}'])
+        with patch.object(self.client, 'chat', side_effect=[failed, success]) as chat, \
+             patch.object(self.client, 'rehandshake') as handshake:
+            self.assertEqual(self.client.ask('hello', retries=2), 'ok')
+        self.assertEqual(chat.call_count, 2)
+        handshake.assert_called_once()
+
+    def test_newly_fetched_challenge_rejection_is_not_replayed(self):
+        self.client.fe_version = self.client.jsa = ''
+        failed = self.response(status=418)
+        failed.headers = {}
+        failed.json.return_value = {'type': 'ERR_CHALLENGE'}
+        with patch.object(self.client, 'chat', return_value=failed) as chat, \
+             patch.object(self.client, 'rehandshake') as handshake:
+            with self.assertRaises(duck.DuckAIError):
+                self.client.ask('hello', retries=4)
+        chat.assert_called_once()
+        handshake.assert_called_once()  # Only the initial protocol initialization.
+
+    def test_rejected_challenge_refresh_is_not_repeated(self):
+        failed = self.response(status=418)
+        failed.headers = {}
+        failed.json.return_value = {'type': 'ERR_CHALLENGE'}
+        with patch.object(self.client, 'chat', return_value=failed) as chat, \
+             patch.object(self.client, 'rehandshake') as handshake:
+            with self.assertRaises(duck.DuckAIError):
+                self.client.ask('hello', retries=4)
+        self.assertEqual(chat.call_count, 2)
+        handshake.assert_called_once()
+
+    def test_challenge_retry_after_is_honored_without_refresh(self):
+        failed = self.response(status=418)
+        failed.headers = {'Retry-After': '60'}
+        failed.json.return_value = {'type': 'ERR_CHALLENGE'}
+        with patch.object(self.client, 'chat', return_value=failed) as chat, \
+             patch.object(self.client, 'rehandshake') as handshake:
+            with self.assertRaises(duck.DuckAIError):
+                self.client.ask('hello', retries=4)
+        chat.assert_called_once()
+        handshake.assert_not_called()
 
     def test_transient_error_is_closed_before_retry(self):
         failed = self.response(status=503)
