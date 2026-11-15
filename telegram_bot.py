@@ -337,7 +337,13 @@ class Bot:
                         type(error).__name__, getattr(error, 'status', None),
                         getattr(error, 'stage', None), getattr(error, 'provider_code', None),
                         getattr(error, 'retry_after', None))
-            if getattr(error, 'status', None) in (418, 429):
+            if (getattr(error, 'status', None) == 418
+                    and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
+                    and getattr(error, 'retry_after', None) is None):
+                # This is a rejected validation proof, not a provider-declared wait.
+                # Report it once; do not invent a countdown or automatically replay it.
+                self.api.send(chat_id, 'اعتبارسنجی اتصال با Duck.ai ناموفق بود؛ سرویس درخواست را نپذیرفت.', reply_to)
+            elif getattr(error, 'status', None) in (418, 429):
                 seconds = max(30, getattr(error, 'retry_after', None) or 0)
                 with self.lock:
                     self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)

@@ -314,6 +314,30 @@ class BotFlowTests(unittest.TestCase):
         self.assertIn('اعتبارسنجی', self.api.sent[-1][1])
         self.assertNotIn('محدودیت استفاده', self.api.sent[-1][1])
 
+    def test_challenge_without_retry_after_has_no_invented_countdown_or_replay(self):
+        self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
+                                                                  provider_code='ERR_CHALLENGE')
+        self.run_message(text='سلام')
+        self.assertLessEqual(self.bot.ai_not_before, telegram.time.monotonic())
+        self.assertNotIn('ثانیه', self.api.sent[-1][1])
+        self.assertEqual(self.client.text_stream.call_count, 1)
+        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='یک درخواست جدید')})
+        self.assertEqual(self.client.text_stream.call_count, 2)
+
+    def test_provider_retry_after_on_challenge_still_applies(self):
+        self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
+                                                                  provider_code='ERR_CHALLENGE', retry_after=120)
+        self.run_message(text='سلام')
+        self.assertIn('120', self.api.sent[-1][1])
+        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='یک درخواست جدید')})
+        self.assertEqual(self.client.text_stream.call_count, 1)
+
+    def test_usage_limit_without_retry_after_retains_bounded_backoff(self):
+        self.client.text_stream.side_effect = telegram.DuckAIError('limit', status=429, stage='chat')
+        self.run_message(text='سلام')
+        self.assertIn('30', self.api.sent[-1][1])
+        self.assertIn('محدودیت استفاده', self.api.sent[-1][1])
+
 
 class TelegramTransportTests(unittest.TestCase):
     def test_invalid_webhook_secret_is_rejected_without_throwing(self):
