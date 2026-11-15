@@ -1,5 +1,7 @@
 # Telegram bot deployment repair
 
+Historical packaging-only repair. The current vision/image-generation adapter and deployment instructions are in `TELEGRAM.md`. The cached-source manifest below restores the older text-only bot and is retained for rollback, not for releasing the current adapter.
+
 Reviewed on 2026-11-15. Vercel project: `duckai-telegram-bot`.
 
 ## Confirmed deployment failure
