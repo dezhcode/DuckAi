@@ -1,9 +1,12 @@
 """Telegram adapter for the repository's DuckAI text, vision and image APIs."""
+import base64
 import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import threading
 import time
@@ -20,7 +23,7 @@ VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
 MAX_FILE_BYTES = 15 * 1024 * 1024
 HELP = ('سلام! متن بفرست تا گفتگو کنیم.\n'
         '📷 عکس را با سؤال در کپشن بفرست؛ یا روی عکس ریپلای کن و سؤالت را بنویس.\n'
-        '🎨 ساخت تصویر: /draw یک گربه فضانورد روی ماه\n'
+        '🎨 برای ساخت تصویر کافی است بنویسی: یک ماشین پرنده طراحی کن\n'
         '/models انتخاب مدل\n/clear پاک‌کردن گفتگوی فعلی')
 
 
@@ -54,10 +57,10 @@ class RemoteDuckAI(DuckAI):
         with requests.post(self.solver_url, json={'source': js_source, 'ua': self.ua},
                            headers={'x-duckai-solver': secret}, timeout=(8, 30)) as response:
             if response.status_code != 200:
-                raise DuckAIError('Challenge solver unavailable', status=response.status_code)
+                raise DuckAIError.from_response(response, 'solver')
             result = response.json()
         if not isinstance(result, dict) or not isinstance(result.get('client_hashes'), list):
-            raise DuckAIError('Invalid challenge solver response')
+            raise DuckAIError('Invalid challenge solver response', stage='solver')
         return result
 
 
@@ -134,6 +137,26 @@ def attachment_from(message):
     return None
 
 
+def is_image_request(text):
+    """Fast path for clear creation requests; the model still chooses tools for other chat."""
+    text = re.sub(r'\s+', ' ', text.translate(str.maketrans({'ي': 'ی', 'ك': 'ک', '\u200c': ' '}))).strip().lower()
+    # Questions about making images, negations, translation and code requests stay in chat.
+    if re.search(r'(?:چطور|چگونه|آموزش|ترجمه|توضیح بده|توضیح بدی|نساز|نکش|نکن|نمی\s*(?:خواهم|خوام)|کد|برنامه نویسی|الگوریتم)', text):
+        return False
+    if re.search(r"\b(?:how|explain|translate|do not|don't|code|algorithm)\b", text):
+        return False
+    if (re.search(r'(?:برنامه|سایت|اپلیکیشن|رژیم|بودجه|استراتژی|نقشه راه)', text)
+            and not re.search(r'(?:عکس|تصویر|نقاشی|پوستر|لوگو|آواتار|والپیپر)', text)):
+        return False
+    if re.search(r'(?:طراحی|نقاشی)\s+(?:کن|کنی|بکن|بکنی)(?=\s|[.!؟?]|$)|(?:^|\s)(?:بکش|بکشی)(?=\s|[.!؟?]|$)', text):
+        return True
+    visual = r'(?:عکس|تصویر|نقاشی|پوستر|لوگو|آواتار|والپیپر)'
+    create = r'(?:بساز|بکش|تولید کن|خلق کن|طراحی کن|بسازی|بکشی|درست کن|درست کنی)'
+    if re.search(visual, text) and re.search(create, text):
+        return True
+    return bool(re.search(r'\b(?:draw|paint|illustrate)\b|\b(?:create|generate|make|design)\b.*\b(?:image|picture|photo|poster|logo|illustration|wallpaper)\b', text))
+
+
 def keyboard():
     return {'inline_keyboard': [[{'text': model, 'callback_data': 'model:' + model}] for model in MODEL_IDS]}
 
@@ -145,6 +168,16 @@ class Bot:
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
+        self.ai_gate = threading.BoundedSemaphore(1)
+        self.ai_not_before = 0
+        self.limit_status = None
+        self.limit_code = None
+
+    def limit_message(self, seconds):
+        reason = ('اعتبارسنجی اتصال با Duck.ai ناموفق بود.' if self.limit_code == 'ERR_CHALLENGE'
+                  else 'Duck.ai محدودیت استفاده اعلام کرده است.' if self.limit_status == 429
+                  else 'Duck.ai درخواست را نپذیرفت.')
+        return reason + ' برای جلوگیری از درخواست‌های تکراری، ' + str(seconds) + ' ثانیه دیگر دوباره امتحان کن.'
 
     def session(self, message):
         key = (message['chat']['id'], message.get('from', {}).get('id', message['chat']['id']))
@@ -159,7 +192,8 @@ class Bot:
                     if idle is None:
                         raise TelegramError('Bot is busy')
                     del self.sessions[idle]
-                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'lock': threading.Lock(), 'used': now}
+                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [],
+                                      'lock': threading.Lock(), 'used': now}
             self.sessions[key]['used'] = now
             return self.sessions[key]
 
@@ -223,28 +257,31 @@ class Bot:
         if not attachment and text and not draw:
             attachment = attachment_from(message.get('reply_to_message') or {})
         if not text and not attachment:
-            self.api.send(chat_id, 'متن یا عکس بفرست. ساخت تصویر: /draw توضیح تصویر', reply_to)
+            self.api.send(chat_id, 'متن یا عکس بفرست؛ برای ساخت تصویر مثلاً بنویس: یک ماشین پرنده طراحی کن.', reply_to)
             return
-        client = self.client_factory()
+        # A photo/question remains a vision request; normal text can select image tools.
+        draw = draw or (attachment is None and is_image_request(text))
+        prompt = argument.strip() if command in ('/draw', '/image') else text
+        prompt = prompt or 'این تصویر را به فارسی توضیح بده.'
+        with self.lock:
+            remaining = math.ceil(self.ai_not_before - time.monotonic())
+        if remaining > 0:
+            self.api.send(chat_id, self.limit_message(remaining), reply_to)
+            return
+        if not self.ai_gate.acquire(blocking=False):
+            self.api.send(chat_id, 'ربات در حال پردازش درخواست دیگری است؛ کمی بعد دوباره بفرست.', reply_to)
+            return
+        client = None
         try:
-            if draw:
-                self.api.action(chat_id, 'upload_photo')
-                # Use the repository's GenerateImage event parser and writable temp storage.
-                with tempfile.TemporaryDirectory(prefix='duckai-image-') as directory:
-                    path, companion, _ = client.generate_image(argument.strip(), model=DEFAULT_MODEL,
-                                                               out_dir=directory, retries=2)
-                    from PIL import Image
-                    with Image.open(path) as generated:
-                        generated.load()
-                        generated = generated.convert('RGB')
-                        generated.thumbnail((2048, 2048))
-                        upload = str(Path(directory) / 'duckai-generated.jpg')
-                        generated.save(upload, 'JPEG', quality=90)
-                    self.api.photo(chat_id, upload, reply_to)
-                    if companion.strip():
-                        self.api.send(chat_id, companion, reply_to)
-                log.info('image_generation_completed')
+            # Another request may have entered cooldown while this one acquired the gate.
+            with self.lock:
+                remaining = math.ceil(self.ai_not_before - time.monotonic())
+            if remaining > 0:
+                self.api.send(chat_id, self.limit_message(remaining), reply_to)
                 return
+            # Fresh HTTP session and protocol state for every accepted request.
+            # stream_events initializes a new challenge for this new client.
+            client = self.client_factory()
             self.api.action(chat_id, 'typing')
             images = None
             model = session['model']
@@ -263,22 +300,76 @@ class Bot:
                 if model not in VISION_MODELS:
                     model = DEFAULT_MODEL
                     self.api.send(chat_id, 'برای تحلیل عکس از مدل ' + model + ' استفاده می‌کنم.', reply_to)
-            prompt = text or 'این تصویر را به فارسی توضیح بده.'
             history = session['history'] if model == session['model'] else []
-            answer = client.ask(prompt, model=model, history=history, images=images, retries=1)
-            self.api.send(chat_id, answer, reply_to)
-            # Retain bounded text context; uploaded image bytes are not cached in process memory.
+            text_parts = []
+            generated = None
+            image_started = False
+            # ask()/stream() intentionally discard non-text events. Chat must consume all
+            # repository events so the provider can generate images without a slash command.
+            for kind, value in client.stream_events(prompt, model=DEFAULT_MODEL if draw else model,
+                                                   history=history, images=images, draw=draw,
+                                                   retries=2):
+                if kind == 'message':
+                    text_parts.append(value)
+                elif kind == 'image':
+                    generated = value
+                if (kind in ('image', 'image_title', 'image_partial') or
+                        (kind == 'tool' and value.get('toolName') == 'GenerateImage')):
+                    if not image_started:
+                        self.api.action(chat_id, 'upload_photo')
+                        image_started = True
+            if generated:
+                self.upload_generated(chat_id, generated, reply_to)
+            elif draw or image_started:
+                raise DuckAIError('No completed image received')
+            answer = ''.join(text_parts)
+            if answer.strip() or not generated:
+                self.api.send(chat_id, answer, reply_to)
+            # Keep bounded text context, including image-request descriptions for follow-ups.
             session['history'] = (history + [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}]},
-                                            {'role': 'assistant', 'content': answer}])[-12:]
-            log.info('vision_completed' if attachment else 'text_completed')
+                                            {'role': 'assistant', 'content': answer or 'تصویر ساخته شد.'}])[-12:]
+            log.info('image_generation_completed' if generated else 'vision_completed' if attachment else 'text_completed')
         except UserInputError as error:
             self.api.send(chat_id, str(error), reply_to)
         except Exception as error:
             # Exception strings can contain a Telegram token or an image payload: never log them.
-            log.warning('request_failed type=%s status=%s', type(error).__name__, getattr(error, 'status', None))
-            if getattr(error, 'status', None) in (418, 429):
-                self.api.send(chat_id, 'سرویس هوش مصنوعی موقتاً درخواست را محدود کرده است. کمی بعد دوباره تلاش کن.', reply_to)
+            log.warning('request_failed type=%s status=%s stage=%s provider_code=%s retry_after=%s',
+                        type(error).__name__, getattr(error, 'status', None),
+                        getattr(error, 'stage', None), getattr(error, 'provider_code', None),
+                        getattr(error, 'retry_after', None))
+            if (getattr(error, 'status', None) == 418
+                    and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
+                    and getattr(error, 'retry_after', None) is None):
+                # This is a rejected validation proof, not a provider-declared wait.
+                # Report it once; do not invent a countdown or automatically replay it.
+                self.api.send(chat_id, 'اعتبارسنجی اتصال با Duck.ai ناموفق بود؛ سرویس درخواست را نپذیرفت.', reply_to)
+            elif getattr(error, 'status', None) in (418, 429):
+                seconds = max(30, getattr(error, 'retry_after', None) or 0)
+                with self.lock:
+                    self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
+                    self.limit_status = error.status
+                    self.limit_code = getattr(error, 'provider_code', None)
+                self.api.send(chat_id, self.limit_message(seconds), reply_to)
             else:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
-            client.s.close()
+            try:
+                if client is not None:
+                    client.s.close()
+            finally:
+                self.ai_gate.release()
+
+    def upload_generated(self, chat_id, generated, reply_to):
+        from PIL import Image
+        with tempfile.TemporaryDirectory(prefix='duckai-image-') as directory:
+            path = Path(directory) / 'generated-image'
+            path.write_bytes(base64.b64decode(generated['b64'], validate=True))
+            with Image.open(path) as image:
+                if image.width * image.height > 25_000_000:
+                    raise DuckAIError('Generated image dimensions exceed limit')
+                image.load()
+                image = image.convert('RGB')
+                image.thumbnail((2048, 2048))
+                upload = str(Path(directory) / 'duckai-generated.jpg')
+                image.save(upload, 'JPEG', quality=90)
+            self.api.photo(chat_id, upload, reply_to)
