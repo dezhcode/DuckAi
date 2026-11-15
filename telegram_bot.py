@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from contextlib import closing
 
 import requests
 
@@ -174,7 +175,7 @@ class Bot:
         self.limit_code = None
 
     def limit_message(self, seconds):
-        reason = ('اعتبارسنجی اتصال با Duck.ai ناموفق بود.' if self.limit_code == 'ERR_CHALLENGE'
+        reason = ('انجام این درخواست فعلاً ممکن نشد.' if self.limit_code == 'ERR_CHALLENGE'
                   else 'Duck.ai محدودیت استفاده اعلام کرده است.' if self.limit_status == 429
                   else 'Duck.ai درخواست را نپذیرفت.')
         return reason + ' برای جلوگیری از درخواست‌های تکراری، ' + str(seconds) + ' ثانیه دیگر دوباره امتحان کن.'
@@ -271,7 +272,6 @@ class Bot:
         if not self.ai_gate.acquire(blocking=False):
             self.api.send(chat_id, 'ربات در حال پردازش درخواست دیگری است؛ کمی بعد دوباره بفرست.', reply_to)
             return
-        client = None
         try:
             # Another request may have entered cooldown while this one acquired the gate.
             with self.lock:
@@ -279,9 +279,6 @@ class Bot:
             if remaining > 0:
                 self.api.send(chat_id, self.limit_message(remaining), reply_to)
                 return
-            # Fresh HTTP session and protocol state for every accepted request.
-            # stream_events initializes a new challenge for this new client.
-            client = self.client_factory()
             self.api.action(chat_id, 'typing')
             images = None
             model = session['model']
@@ -306,18 +303,18 @@ class Bot:
             image_started = False
             # ask()/stream() intentionally discard non-text events. Chat must consume all
             # repository events so the provider can generate images without a slash command.
-            for kind, value in client.stream_events(prompt, model=DEFAULT_MODEL if draw else model,
-                                                   history=history, images=images, draw=draw,
-                                                   retries=2):
-                if kind == 'message':
-                    text_parts.append(value)
-                elif kind == 'image':
-                    generated = value
-                if (kind in ('image', 'image_title', 'image_partial') or
-                        (kind == 'tool' and value.get('toolName') == 'GenerateImage')):
-                    if not image_started:
-                        self.api.action(chat_id, 'upload_photo')
-                        image_started = True
+            with closing(self.response_events(prompt, model=DEFAULT_MODEL if draw else model,
+                                              history=history, images=images, draw=draw)) as events:
+                for kind, value in events:
+                    if kind == 'message':
+                        text_parts.append(value)
+                    elif kind == 'image':
+                        generated = value
+                    if (kind in ('image', 'image_title', 'image_partial') or
+                            (kind == 'tool' and value.get('toolName') == 'GenerateImage')):
+                        if not image_started:
+                            self.api.action(chat_id, 'upload_photo')
+                            image_started = True
             if generated:
                 self.upload_generated(chat_id, generated, reply_to)
             elif draw or image_started:
@@ -340,9 +337,7 @@ class Bot:
             if (getattr(error, 'status', None) == 418
                     and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
                     and getattr(error, 'retry_after', None) is None):
-                # This is a rejected validation proof, not a provider-declared wait.
-                # Report it once; do not invent a countdown or automatically replay it.
-                self.api.send(chat_id, 'اعتبارسنجی اتصال با Duck.ai ناموفق بود؛ سرویس درخواست را نپذیرفت.', reply_to)
+                self.api.send(chat_id, 'انجام این درخواست فعلاً ممکن نشد. کمی بعد دوباره امتحان کن.', reply_to)
             elif getattr(error, 'status', None) in (418, 429):
                 seconds = max(30, getattr(error, 'retry_after', None) or 0)
                 with self.lock:
@@ -353,11 +348,29 @@ class Bot:
             else:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
+            self.ai_gate.release()
+
+    def response_events(self, prompt, **options):
+        # Two attempts total, on the same provider and normal authentication flow.
+        # Never retry a partial response, quota failure or provider-declared wait.
+        for attempt in range(2):
+            client = self.client_factory()
+            emitted = False
             try:
-                if client is not None:
-                    client.s.close()
+                with closing(client.stream_events(prompt, retries=1, **options)) as events:
+                    for event in events:
+                        emitted = True
+                        yield event
+                return
+            except DuckAIError as error:
+                retryable = (attempt == 0 and not emitted and error.status == 418
+                             and error.stage == 'chat' and error.provider_code == 'ERR_CHALLENGE'
+                             and error.retry_after is None)
+                if not retryable:
+                    raise
+                log.info('challenge_retry attempt=2 stage=chat')
             finally:
-                self.ai_gate.release()
+                client.s.close()
 
     def upload_generated(self, chat_id, generated, reply_to):
         from PIL import Image

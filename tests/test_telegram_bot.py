@@ -105,7 +105,7 @@ class BotFlowTests(unittest.TestCase):
         self.run_message(text='/draw یک گربه فضانورد')
         self.assertEqual(self.client.image_requests[0][0], 'یک گربه فضانورد')
         self.assertTrue(self.client.image_requests[0][1]['draw'])
-        self.assertEqual(self.client.image_requests[0][1]['retries'], 2)
+        self.assertEqual(self.client.image_requests[0][1]['retries'], 1)
         self.assertEqual(len(self.api.photos), 1)
         chat, data, reply_to, path = self.api.photos[0]
         self.assertEqual((chat, reply_to), (12, 56))
@@ -311,18 +311,19 @@ class BotFlowTests(unittest.TestCase):
         self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
                                                                   provider_code='ERR_CHALLENGE')
         self.run_message(text='سلام')
-        self.assertIn('اعتبارسنجی', self.api.sent[-1][1])
+        self.assertIn('ممکن نشد', self.api.sent[-1][1])
+        self.assertNotIn('اعتبارسنجی', self.api.sent[-1][1])
         self.assertNotIn('محدودیت استفاده', self.api.sent[-1][1])
 
-    def test_challenge_without_retry_after_has_no_invented_countdown_or_replay(self):
+    def test_challenge_without_retry_after_has_no_countdown_and_only_one_retry(self):
         self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
                                                                   provider_code='ERR_CHALLENGE')
         self.run_message(text='سلام')
         self.assertLessEqual(self.bot.ai_not_before, telegram.time.monotonic())
         self.assertNotIn('ثانیه', self.api.sent[-1][1])
-        self.assertEqual(self.client.text_stream.call_count, 1)
-        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='یک درخواست جدید')})
         self.assertEqual(self.client.text_stream.call_count, 2)
+        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='یک درخواست جدید')})
+        self.assertEqual(self.client.text_stream.call_count, 4)
 
     def test_provider_retry_after_on_challenge_still_applies(self):
         self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
@@ -337,6 +338,70 @@ class BotFlowTests(unittest.TestCase):
         self.run_message(text='سلام')
         self.assertIn('30', self.api.sent[-1][1])
         self.assertIn('محدودیت استفاده', self.api.sent[-1][1])
+
+    def test_first_challenge_failure_is_hidden_and_fresh_session_can_succeed(self):
+        first, second = EventClient(), EventClient()
+        first.text_stream.side_effect = telegram.DuckAIError('private error', status=418, stage='chat',
+                                                            provider_code='ERR_CHALLENGE')
+        self.bot.client_factory = Mock(side_effect=[first, second])
+        with patch.object(first.s, 'close') as first_close, patch.object(second.s, 'close') as second_close:
+            self.run_message(text='سلام')
+            first_close.assert_called_once()
+            second_close.assert_called_once()
+        self.assertEqual(self.bot.client_factory.call_count, 2)
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertEqual(self.api.sent[0][1], 'یک تصویر قرمز است.')
+        self.assertNotIn('اعتبارسنجی', self.api.sent[0][1])
+        self.assertEqual(len(self.bot.session(self.message)['history']), 2)
+
+    def test_two_failures_stop_and_show_only_a_generic_message(self):
+        first, second = EventClient(), EventClient()
+        for client in (first, second):
+            client.text_stream.side_effect = telegram.DuckAIError('private error', status=418, stage='chat',
+                                                                 provider_code='ERR_CHALLENGE')
+        self.bot.client_factory = Mock(side_effect=[first, second])
+        self.run_message(text='سلام')
+        self.assertEqual(self.bot.client_factory.call_count, 2)
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn('ممکن نشد', self.api.sent[0][1])
+        self.assertNotIn('اعتبارسنجی', self.api.sent[0][1])
+        self.assertNotIn('private error', self.api.sent[0][1])
+
+    def test_partial_response_is_not_replayed(self):
+        def partial(*args, **kwargs):
+            yield ('message', 'partial response')
+            raise telegram.DuckAIError('reject', status=418, stage='chat', provider_code='ERR_CHALLENGE')
+        self.client.text_stream.side_effect = partial
+        self.bot.client_factory = Mock(return_value=self.client)
+        self.run_message(text='سلام')
+        self.bot.client_factory.assert_called_once()
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertNotIn('partial response', self.api.sent[0][1])
+
+    def test_image_request_retries_once_and_uploads_only_once(self):
+        first, second = EventClient(), EventClient()
+        first.stream_events = Mock(side_effect=telegram.DuckAIError('reject', status=418, stage='chat',
+                                                                   provider_code='ERR_CHALLENGE'))
+        self.bot.client_factory = Mock(side_effect=[first, second])
+        self.run_message(text='یک ماشین پرنده طراحی کن')
+        self.assertEqual(self.bot.client_factory.call_count, 2)
+        self.assertEqual(len(self.api.photos), 1)
+        self.assertEqual(first.stream_events.call_args.args[0], second.image_requests[0][0])
+        self.assertFalse(any('اعتبارسنجی' in item[1] for item in self.api.sent))
+
+    def test_stopping_response_stream_closes_upstream_response_and_client(self):
+        client = DuckAI()
+        client.fe_version, client.jsa = 'fixture', 'fixture'
+        response = Mock(status_code=200)
+        response.iter_lines.return_value = iter([b'data: {"message":"a"}', b'data: {"message":"b"}'])
+        client.chat = Mock(return_value=response)
+        self.bot.client_factory = Mock(return_value=client)
+        with patch.object(client.s, 'close') as close:
+            events = self.bot.response_events('hello')
+            self.assertEqual(next(events), ('message', 'a'))
+            events.close()
+            close.assert_called_once()
+            response.close.assert_called_once()
 
 
 class TelegramTransportTests(unittest.TestCase):
