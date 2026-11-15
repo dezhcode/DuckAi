@@ -281,6 +281,42 @@ class DuckAI:
             self.s.proxies = {"http": proxy, "https": proxy}
         self.fe_version = ""
         self.jsa = ""  # last proof (reused for later requests of the same conversation)
+        self._pending_response_challenge = None
+
+    def queue_response_challenge(self, response):
+        """Capture the next challenge without reading/buffering the SSE response."""
+        raw = response.headers.get('x-vqd-hash-1')
+        if not isinstance(raw, str) or not raw or len(raw) > 300_000:
+            return False
+        try:
+            source = base64.b64decode(raw + '=' * (-len(raw) % 4), validate=True).decode('utf-8')
+        except (ValueError, UnicodeError):
+            return False
+        if not source or len(source) > 200_000:
+            return False
+        self._pending_response_challenge = source
+        return True
+
+    def adopt_response_challenge(self, previous):
+        """Continue server-provided authentication state within the same request only."""
+        if not previous._pending_response_challenge:
+            return False
+        self.fe_version = previous.fe_version
+        self.jsa = ''
+        self.s.cookies.update(previous.s.cookies)
+        self._pending_response_challenge = previous._pending_response_challenge
+        previous._pending_response_challenge = None
+        return True
+
+    def use_response_challenge(self):
+        source = self._pending_response_challenge
+        self._pending_response_challenge = None
+        try:
+            self.jsa = self.build_proof(self.solve(source))
+        except DuckAIError:
+            raise
+        except (ValueError, KeyError, TypeError):
+            raise DuckAIError('Invalid response challenge result', stage='response_challenge') from None
 
     # ────────── handshake ──────────
 
@@ -371,6 +407,7 @@ class DuckAI:
 
     def rehandshake(self):
         """Initialize the current conversation's protocol state."""
+        self._pending_response_challenge = None
         self.bootstrap()
         challenge = self.fetch_challenge()
         try:
@@ -432,15 +469,18 @@ class DuckAI:
         r = None
         last = None
         status = None
-        reused_proof = bool(self.fe_version and self.jsa)
+        reused_proof = bool(self.fe_version and self.jsa) and not self._pending_response_challenge
         for attempt in range(retries):
-            if attempt:
+            if self._pending_response_challenge:
+                self.use_response_challenge()
+            elif attempt:
                 self.rehandshake()
             else:
                 if not self.fe_version or not self.jsa:
                     self.rehandshake()
             r = self.chat(prompt, model, history=history, images=images,
                           draw=draw, prompt_extra=prompt_extra)
+            response_challenge = self.queue_response_challenge(r)
             if r.status_code == 200:
                 break
             status = r.status_code
@@ -450,7 +490,7 @@ class DuckAI:
             # as the CLI does, only for this explicit protocol error. A newly fetched
             # proof rejected on the first request is not replayed. Honor Retry-After.
             if (r.status_code == 418 and last.provider_code == 'ERR_CHALLENGE'
-                    and reused_proof and attempt == 0 and attempt + 1 < retries
+                    and (reused_proof or response_challenge) and attempt == 0 and attempt + 1 < retries
                     and last.retry_after is None):
                 reused_proof = False
                 continue

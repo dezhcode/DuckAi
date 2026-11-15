@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import tempfile
 import threading
 import unittest
@@ -402,6 +403,49 @@ class BotFlowTests(unittest.TestCase):
             events.close()
             close.assert_called_once()
             response.close.assert_called_once()
+
+    def test_retry_uses_returned_challenge_and_matching_cookies(self):
+        first, second = DuckAI(), DuckAI()
+        first.fe_version, first.jsa = 'fixture-version', 'initial-proof'
+        first.s.cookies.set('fixture', 'matching-response-cookie', domain='duck.ai', path='/')
+        failed = Mock(status_code=418)
+        failed.headers = {'x-vqd-hash-1': base64.b64encode(b'fixture-response-challenge').decode()}
+        failed.json.return_value = {'type': 'ERR_CHALLENGE'}
+        success = Mock(status_code=200)
+        success.headers = {}
+        success.iter_lines.return_value = iter([b'data: {"message":"recovered"}'])
+        first.chat = Mock(return_value=failed)
+        second.chat = Mock(return_value=success)
+        first.rehandshake = Mock()
+        second.rehandshake = Mock()
+        second.solve = Mock(return_value={'client_hashes': ['response-proof']})
+        self.bot.client_factory = Mock(side_effect=[first, second])
+        with patch.object(first.s, 'close') as close_first, patch.object(second.s, 'close') as close_second:
+            self.run_message(text='سلام')
+            close_first.assert_called_once()
+            close_second.assert_called_once()
+        first.rehandshake.assert_not_called()
+        second.rehandshake.assert_not_called()
+        second.solve.assert_called_once_with('fixture-response-challenge')
+        self.assertEqual(second.fe_version, 'fixture-version')
+        self.assertEqual(second.s.cookies.get('fixture'), 'matching-response-cookie')
+        self.assertEqual(self.bot.client_factory.call_count, 2)
+        self.assertEqual(self.api.sent[0][1], 'recovered')
+        self.assertEqual(len(self.api.sent), 1)
+        failed.close.assert_called_once()
+        success.close.assert_called_once()
+        self.assertIsNone(first._pending_response_challenge)
+
+    def test_gemini_configuration_never_enables_fallback(self):
+        self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
+                                                                  provider_code='ERR_CHALLENGE')
+        with patch.dict(telegram.os.environ, {'GEMINI_API_KEY': 'unused-fixture'}), \
+             patch.object(telegram.requests, 'post') as other_provider:
+            self.run_message(text='سلام')
+        other_provider.assert_not_called()
+        self.assertEqual(self.client.text_stream.call_count, 2)
+        self.assertEqual(len(self.api.sent), 1)
+        self.assertIn('ممکن نشد', self.api.sent[0][1])
 
 
 class TelegramTransportTests(unittest.TestCase):

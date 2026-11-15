@@ -353,10 +353,15 @@ class Bot:
     def response_events(self, prompt, **options):
         # Two attempts total, on the same provider and normal authentication flow.
         # Never retry a partial response, quota failure or provider-declared wait.
+        previous = None
         for attempt in range(2):
             client = self.client_factory()
             emitted = False
             try:
+                if previous is not None:
+                    adopted = client.adopt_response_challenge(previous)
+                    log.info('challenge_retry_state source=%s', 'response_header' if adopted else 'new_handshake')
+                    previous = None
                 with closing(client.stream_events(prompt, retries=1, **options)) as events:
                     for event in events:
                         emitted = True
@@ -368,6 +373,7 @@ class Bot:
                              and error.retry_after is None)
                 if not retryable:
                     raise
+                previous = client
                 log.info('challenge_retry attempt=2 stage=chat')
             finally:
                 client.s.close()

@@ -1,3 +1,5 @@
+import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -199,6 +201,71 @@ class StreamTests(unittest.TestCase):
                 self.client.ask('hi', retries=1)
         sleep.assert_not_called()
         response.close.assert_called_once()
+
+    def test_success_response_challenge_is_used_for_next_call_without_bootstrap(self):
+        first = self.response(lines=[b'data: {"message":"first"}'])
+        first.headers = {'x-vqd-hash-1': base64.b64encode(b'fixture-next-challenge').decode()}
+        second = self.response(lines=[b'data: {"message":"second"}'])
+        second.headers = {}
+        with patch.object(self.client, 'chat', side_effect=[first, second]), \
+             patch.object(self.client, 'solve', return_value={'client_hashes': ['next-proof']}) as solve, \
+             patch.object(self.client, 'rehandshake') as handshake:
+            self.assertEqual(self.client.ask('one'), 'first')
+            solve.assert_not_called()  # Do not delay/read the first response body to solve future state.
+            first.json.assert_not_called()
+            self.assertEqual(self.client.ask('two'), 'second')
+        solve.assert_called_once_with('fixture-next-challenge')
+        handshake.assert_not_called()
+        proof = json.loads(base64.b64decode(self.client.jsa))
+        self.assertEqual(proof['client_hashes'], [duck.sha256_b64('next-proof')])
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
+    def test_rejected_request_can_use_server_replacement_challenge(self):
+        failed = self.response(status=418)
+        failed.headers = {'x-vqd-hash-1': base64.b64encode(b'fixture-next-challenge').decode()}
+        failed.json.return_value = {'type': 'ERR_CHALLENGE'}
+        success = self.response(lines=[b'data: {"message":"recovered"}'])
+        success.headers = {}
+        self.client.fe_version = self.client.jsa = ''
+        def initialize():
+            self.client.fe_version, self.client.jsa = 'version', 'initial-proof'
+        with patch.object(self.client, 'chat', side_effect=[failed, success]) as chat, \
+             patch.object(self.client, 'solve', return_value={'client_hashes': ['next']}) as solve, \
+             patch.object(self.client, 'rehandshake', side_effect=initialize) as handshake:
+            self.assertEqual(self.client.ask('hello', retries=2), 'recovered')
+        self.assertEqual(chat.call_count, 2)
+        handshake.assert_called_once()  # Initial status request only.
+        solve.assert_called_once_with('fixture-next-challenge')
+
+    def test_bad_response_challenges_do_not_break_a_successful_answer(self):
+        for header in ('!invalid!', base64.b64encode(b'\xff').decode(), 'a' * 300001):
+            with self.subTest(header_length=len(header)):
+                response = self.response(lines=[b'data: {"message":"ok"}'])
+                response.headers = {'x-vqd-hash-1': header}
+                with patch.object(self.client, 'chat', return_value=response), patch.object(self.client, 'solve') as solve:
+                    self.assertEqual(self.client.ask('hello'), 'ok')
+                solve.assert_not_called()
+                self.assertIsNone(self.client._pending_response_challenge)
+
+    def test_replacement_header_does_not_bypass_rate_limit_wait(self):
+        failed = self.response(status=429)
+        failed.headers = {'x-vqd-hash-1': base64.b64encode(b'fixture-next-challenge').decode(), 'Retry-After': '120'}
+        failed.json.return_value = {'type': 'ERR_LIMIT'}
+        with patch.object(self.client, 'chat', return_value=failed) as chat, patch.object(self.client, 'solve') as solve:
+            with self.assertRaises(duck.DuckAIError) as caught:
+                self.client.ask('hello', retries=4)
+        self.assertEqual(caught.exception.retry_after, 120)
+        chat.assert_called_once()
+        solve.assert_not_called()
+
+    def test_chat_transport_targets_only_duck_even_with_gemini_key_present(self):
+        with patch.dict(duck.os.environ, {'GEMINI_API_KEY': 'unused-fixture'}), \
+             patch.object(self.client.s, 'post', return_value=self.response()) as post:
+            self.client.chat('hello', draw=True)
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0], 'https://duck.ai/duckchat/v1/chat')
+        self.assertEqual(json.loads(post.call_args.kwargs['data'])['metadata'], {'toolChoice': {'GenerateImage': True}})
 
 
 if __name__ == '__main__':
