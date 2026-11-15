@@ -68,6 +68,7 @@ class BotFlowTests(unittest.TestCase):
         self.client = EventClient()
         self.bot = telegram.Bot(self.api, lambda: self.client)
         self.message = {'chat': {'id': 12}, 'from': {'id': 34}, 'message_id': 56}
+        self.bot.session(self.message)['introduced'] = True
 
     def run_message(self, **fields):
         self.bot.handle_update({'update_id': 1, 'message': dict(self.message, **fields)})

@@ -16,13 +16,15 @@ from contextlib import closing
 import requests
 
 from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
+from trump_persona import INTRO, IDENTITY, identity_question, news_query, request_history, unsupported_personal_claim
+from news_reader import NewsReader, context as news_context, finish_answer
 
 log = logging.getLogger(__name__)
 DEFAULT_MODEL = MODELS['luna']
 MODEL_IDS = list(dict.fromkeys(MODELS[k] for k in ('luna', 'mini', 'haiku', 'mistral', 'oss', 'gemma')))
 VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
 MAX_FILE_BYTES = 15 * 1024 * 1024
-HELP = ('سلام! متن بفرست تا گفتگو کنیم.\n'
+HELP = (IDENTITY + '\nسلام. درباره چه موضوعی صحبت کنیم؟\n'
         '📷 عکس را با سؤال در کپشن بفرست؛ یا روی عکس ریپلای کن و سؤالت را بنویس.\n'
         '🎨 برای ساخت تصویر کافی است بنویسی: یک ماشین پرنده طراحی کن\n'
         '/models انتخاب مدل\n/clear پاک‌کردن گفتگوی فعلی')
@@ -163,9 +165,10 @@ def keyboard():
 
 
 class Bot:
-    def __init__(self, api, client_factory=None):
+    def __init__(self, api, client_factory=None, news_reader=None):
         self.api = api
         self.client_factory = client_factory or (lambda: RemoteDuckAI(api.token))
+        self.news_reader = news_reader if news_reader is not None else NewsReader()
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
@@ -193,7 +196,7 @@ class Bot:
                     if idle is None:
                         raise TelegramError('Bot is busy')
                     del self.sessions[idle]
-                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [],
+                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'introduced': False, 'news_topic': None,
                                       'lock': threading.Lock(), 'used': now}
             self.sessions[key]['used'] = now
             return self.sessions[key]
@@ -229,7 +232,7 @@ class Bot:
         self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'],
                                             'text': 'مدل انتخاب شد' if valid else 'مدل نامعتبر است'})
         if valid:
-            session.update(model=model, history=[])
+            session.update(model=model, history=[], news_topic=None)
             self.api.send(message['chat']['id'], 'مدل فعلی: ' + model)
 
     def message(self, message, session):
@@ -242,9 +245,11 @@ class Bot:
         command = command.split('@')[0].lower()
         if command in ('/start', '/help'):
             self.api.send(chat_id, HELP, reply_to)
+            session['introduced'] = True
             return
         if command in ('/clear', '/new'):
             session['history'] = []
+            session['news_topic'] = None
             self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
             return
         if command in ('/models', '/model'):
@@ -264,6 +269,10 @@ class Bot:
         draw = draw or (attachment is None and is_image_request(text))
         prompt = argument.strip() if command in ('/draw', '/image') else text
         prompt = prompt or 'این تصویر را به فارسی توضیح بده.'
+        if not draw and identity_question(prompt):
+            self.api.send(chat_id, IDENTITY, reply_to)
+            session['introduced'] = True
+            return
         with self.lock:
             remaining = math.ceil(self.ai_not_before - time.monotonic())
         if remaining > 0:
@@ -280,6 +289,14 @@ class Bot:
                 self.api.send(chat_id, self.limit_message(remaining), reply_to)
                 return
             self.api.action(chat_id, 'typing')
+            sources = []
+            query = news_query(prompt, session['news_topic']) if not draw else None
+            if query:
+                session['news_topic'] = query[-700:]
+                sources = self.news_reader.search(query)
+                if not sources and not attachment:
+                    self.send_answer(chat_id, 'برای این موضوع، خبر تازه و مرتبطی در منابع در دسترس تأیید نکردم. بدون منبع درباره جزئیاتش ادعایی نمی‌کنم.', reply_to, session)
+                    return
             images = None
             model = session['model']
             if attachment:
@@ -298,13 +315,14 @@ class Bot:
                     model = DEFAULT_MODEL
                     self.api.send(chat_id, 'برای تحلیل عکس از مدل ' + model + ' استفاده می‌کنم.', reply_to)
             history = session['history'] if model == session['model'] else []
+            transport_history = request_history(history, news_context(sources) if sources else '')
             text_parts = []
             generated = None
             image_started = False
             # ask()/stream() intentionally discard non-text events. Chat must consume all
             # repository events so the provider can generate images without a slash command.
             with closing(self.response_events(prompt, model=DEFAULT_MODEL if draw else model,
-                                              history=history, images=images, draw=draw)) as events:
+                                              history=transport_history, images=images, draw=draw)) as events:
                 for kind, value in events:
                     if kind == 'message':
                         text_parts.append(value)
@@ -316,12 +334,18 @@ class Bot:
                             self.api.action(chat_id, 'upload_photo')
                             image_started = True
             if generated:
+                if not session['introduced']:
+                    self.send_answer(chat_id, 'تصویر آماده است.', reply_to, session)
                 self.upload_generated(chat_id, generated, reply_to)
             elif draw or image_started:
                 raise DuckAIError('No completed image received')
             answer = ''.join(text_parts)
+            if answer.strip() and sources:
+                answer = finish_answer(answer, sources)
+            elif answer.strip() and unsupported_personal_claim(answer):
+                answer = 'این شخصیت شبیه‌سازی‌شده است؛ اقدام واقعی را به خودم نسبت نمی‌دهم. برای بررسی چنین ادعایی، منبع معتبر لازم است.'
             if answer.strip() or not generated:
-                self.api.send(chat_id, answer, reply_to)
+                self.send_answer(chat_id, answer, reply_to, session)
             # Keep bounded text context, including image-request descriptions for follow-ups.
             session['history'] = (history + [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}]},
                                             {'role': 'assistant', 'content': answer or 'تصویر ساخته شد.'}])[-12:]
@@ -349,6 +373,12 @@ class Bot:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
             self.ai_gate.release()
+
+    def send_answer(self, chat_id, answer, reply_to, session):
+        if not session['introduced']:
+            answer = INTRO + '\n\n' + answer
+        self.api.send(chat_id, answer, reply_to)
+        session['introduced'] = True
 
     def response_events(self, prompt, **options):
         # Two attempts total, on the same provider and normal authentication flow.
