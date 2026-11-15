@@ -20,7 +20,7 @@ from trump_persona import INTRO, IDENTITY, identity_question, news_query, reques
 from news_reader import NewsReader, context as news_context, finish_answer
 
 log = logging.getLogger(__name__)
-DEFAULT_MODEL = MODELS['luna']
+DEFAULT_MODEL = MODELS['haiku']
 MODEL_IDS = list(dict.fromkeys(MODELS[k] for k in ('luna', 'mini', 'haiku', 'mistral', 'oss', 'gemma')))
 VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
 MAX_FILE_BYTES = 15 * 1024 * 1024
