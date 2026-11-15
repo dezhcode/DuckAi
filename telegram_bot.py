@@ -173,13 +173,6 @@ class Bot:
         self.limit_status = None
         self.limit_code = None
 
-    @staticmethod
-    def close_client(session):
-        client = session.get('client')
-        if client is not None:
-            client.s.close()
-            session['client'] = None
-
     def limit_message(self, seconds):
         reason = ('اعتبارسنجی اتصال با Duck.ai ناموفق بود.' if self.limit_code == 'ERR_CHALLENGE'
                   else 'Duck.ai محدودیت استفاده اعلام کرده است.' if self.limit_status == 429
@@ -192,16 +185,14 @@ class Bot:
             now = time.monotonic()
             for old_key, item in list(self.sessions.items()):
                 if now - item['used'] > 1800 and not item['lock'].locked():
-                    self.close_client(item)
                     del self.sessions[old_key]
             if key not in self.sessions:
                 if len(self.sessions) >= 256:
                     idle = next((k for k, v in self.sessions.items() if not v['lock'].locked()), None)
                     if idle is None:
                         raise TelegramError('Bot is busy')
-                    self.close_client(self.sessions[idle])
                     del self.sessions[idle]
-                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'client': None,
+                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [],
                                       'lock': threading.Lock(), 'used': now}
             self.sessions[key]['used'] = now
             return self.sessions[key]
@@ -237,7 +228,6 @@ class Bot:
         self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'],
                                             'text': 'مدل انتخاب شد' if valid else 'مدل نامعتبر است'})
         if valid:
-            self.close_client(session)
             session.update(model=model, history=[])
             self.api.send(message['chat']['id'], 'مدل فعلی: ' + model)
 
@@ -253,7 +243,6 @@ class Bot:
             self.api.send(chat_id, HELP, reply_to)
             return
         if command in ('/clear', '/new'):
-            self.close_client(session)
             session['history'] = []
             self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
             return
@@ -282,6 +271,7 @@ class Bot:
         if not self.ai_gate.acquire(blocking=False):
             self.api.send(chat_id, 'ربات در حال پردازش درخواست دیگری است؛ کمی بعد دوباره بفرست.', reply_to)
             return
+        client = None
         try:
             # Another request may have entered cooldown while this one acquired the gate.
             with self.lock:
@@ -289,9 +279,9 @@ class Bot:
             if remaining > 0:
                 self.api.send(chat_id, self.limit_message(remaining), reply_to)
                 return
-            if session['client'] is None:
-                session['client'] = self.client_factory()
-            client = session['client']
+            # Fresh HTTP session and protocol state for every accepted request.
+            # stream_events initializes a new challenge for this new client.
+            client = self.client_factory()
             self.api.action(chat_id, 'typing')
             images = None
             model = session['model']
@@ -357,7 +347,11 @@ class Bot:
             else:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
-            self.ai_gate.release()
+            try:
+                if client is not None:
+                    client.s.close()
+            finally:
+                self.ai_gate.release()
 
     def upload_generated(self, chat_id, generated, reply_to):
         from PIL import Image

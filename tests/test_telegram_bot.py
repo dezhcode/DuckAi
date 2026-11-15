@@ -206,30 +206,61 @@ class BotFlowTests(unittest.TestCase):
         second = self.bot.session(dict(self.message, **{'from': {'id': 35}}))
         self.assertIsNot(first, second)
 
-    def test_conversation_reuses_client_cookies_and_connection(self):
-        factory = Mock(return_value=self.client)
-        self.bot.client_factory = factory
-        self.client.s.cookies.set('fixture', 'cookie-state')
-        with patch.object(self.client.s, 'close') as close:
+    def test_each_request_uses_a_new_client_and_closes_it(self):
+        first, second = EventClient(), EventClient()
+        first.s.cookies.set('fixture', 'first-only')
+        self.bot.client_factory = Mock(side_effect=[first, second])
+        with patch.object(first.s, 'close') as first_close, patch.object(second.s, 'close') as second_close:
             self.run_message(text='سلام')
             self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='ادامه بده')})
-            factory.assert_called_once()
-            close.assert_not_called()
-        self.assertEqual(self.client.s.cookies.get('fixture'), 'cookie-state')
-        self.assertIs(self.bot.session(self.message)['client'], self.client)
-        self.assertEqual(self.client.text_stream.call_count, 2)
+            first_close.assert_called_once()
+            second_close.assert_called_once()
+        self.assertEqual(self.bot.client_factory.call_count, 2)
+        self.assertIsNone(second.s.cookies.get('fixture'))
+        self.assertNotIn('client', self.bot.session(self.message))
 
-    def test_clear_closes_client_and_resets_conversation(self):
+    def test_clear_resets_conversation_without_holding_a_provider_client(self):
         self.run_message(text='سلام')
-        with patch.object(self.client.s, 'close') as close:
-            self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='/clear')})
-            close.assert_called_once()
+        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='/clear')})
         session = self.bot.session(self.message)
-        self.assertIsNone(session['client'])
+        self.assertNotIn('client', session)
         self.assertEqual(session['history'], [])
 
-    def test_upstream_retry_after_blocks_repeated_calls_and_preserves_client(self):
+    def test_failed_request_also_closes_the_client(self):
+        self.client.text_stream.side_effect = RuntimeError('fixture failure')
+        with patch.object(self.client.s, 'close') as close:
+            self.run_message(text='سلام')
+            close.assert_called_once()
+        self.assertTrue(self.bot.ai_gate.acquire(blocking=False))
+        self.bot.ai_gate.release()
+
+    def test_real_stream_initializes_a_fresh_challenge_for_each_request(self):
+        clients = []
+        def factory():
+            client = DuckAI()
+            def handshake():
+                client.fe_version = 'fixture-version'
+                client.jsa = 'fixture-proof'
+            client.rehandshake = Mock(side_effect=handshake)
+            response = Mock(status_code=200)
+            response.iter_lines.return_value = iter([b'data: {"message":"hello"}'])
+            client.chat = Mock(return_value=response)
+            client.s.close = Mock(wraps=client.s.close)
+            clients.append(client)
+            return client
+        self.bot.client_factory = factory
+        self.run_message(text='سلام')
+        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='ادامه بده')})
+        self.assertEqual(len(clients), 2)
+        self.assertIsNot(clients[0].s, clients[1].s)
+        for client in clients:
+            client.rehandshake.assert_called_once()
+            client.chat.assert_called_once()
+            client.s.close.assert_called_once()
+
+    def test_upstream_retry_after_blocks_repeated_calls_before_new_client(self):
         clock = [100.0]
+        self.bot.client_factory = Mock(return_value=self.client)
         self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat', retry_after=120)
         with patch.object(telegram.time, 'monotonic', side_effect=lambda: clock[0]):
             self.run_message(text='سلام')
@@ -241,7 +272,8 @@ class BotFlowTests(unittest.TestCase):
             clock[0] = 221
             self.bot.handle_update({'update_id': 3, 'message': dict(self.message, text='ادامه')})
             self.assertEqual(self.client.text_stream.call_count, 2)
-            self.assertIs(self.bot.session(self.message)['client'], self.client)
+            self.assertEqual(self.bot.client_factory.call_count, 2)
+            self.assertNotIn('client', self.bot.session(self.message))
 
     def test_new_chat_does_not_cancel_cooldown(self):
         self.bot.ai_not_before = telegram.time.monotonic() + 120
@@ -258,13 +290,13 @@ class BotFlowTests(unittest.TestCase):
         finally:
             self.bot.ai_gate.release()
 
-    def test_expired_conversation_closes_its_connection(self):
+    def test_expired_conversation_does_not_retain_connections(self):
         self.run_message(text='سلام')
         first = self.bot.session(self.message)
         first['used'] = telegram.time.monotonic() - 1801
-        with patch.object(self.client.s, 'close') as close:
-            self.bot.session(dict(self.message, **{'from': {'id': 99}}))
-            close.assert_called_once()
+        self.bot.session(dict(self.message, **{'from': {'id': 99}}))
+        self.assertNotIn((12, 34), self.bot.sessions)
+        self.assertNotIn('client', first)
 
     def test_error_log_has_stage_without_provider_message_or_token(self):
         self.client.text_stream.side_effect = telegram.DuckAIError('secret prompt and token', status=418,

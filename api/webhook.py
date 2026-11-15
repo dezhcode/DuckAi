@@ -23,7 +23,7 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.respond(200, {'ok': bool(TOKEN), 'service': 'DuckAI Telegram webhook',
-                           'features': ['text', 'image-understanding', 'image-generation', 'natural-image-requests'], 'version': '2.2.0'})
+                           'features': ['text', 'image-understanding', 'image-generation', 'natural-image-requests'], 'version': '2.3.0'})
 
     def do_POST(self):
         if not authorized(TOKEN, self.headers.get('X-Telegram-Bot-Api-Secret-Token', '')):
