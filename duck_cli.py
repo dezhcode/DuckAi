@@ -52,6 +52,7 @@ import tempfile
 import threading
 import time
 import uuid
+from email.utils import parsedate_to_datetime
 
 if sys.platform == "win32":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
@@ -143,9 +144,39 @@ def b64_json(obj) -> str:
 
 
 class DuckAIError(RuntimeError):
-    def __init__(self, message: str, status: int | None = None):
+    def __init__(self, message: str, status: int | None = None, *, stage=None,
+                 provider_code=None, retry_after=None):
         super().__init__(message)
         self.status = status
+        self.stage = stage
+        self.provider_code = provider_code
+        self.retry_after = retry_after
+
+    @classmethod
+    def from_response(cls, response, stage):
+        """Keep only machine-readable diagnostics; never retain response bodies."""
+        code = None
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                candidate = payload.get('type') or payload.get('code')
+                if isinstance(candidate, str) and re.fullmatch(r'ERR_[A-Z0-9_]{1,75}', candidate):
+                    code = candidate
+        except (ValueError, requests.RequestException):
+            pass
+        retry_after = None
+        value = response.headers.get('Retry-After')
+        if isinstance(value, str):
+            try:
+                retry_after = max(0, int(value))
+            except ValueError:
+                try:
+                    retry_after = max(0, int(parsedate_to_datetime(value).timestamp() - time.time()) + 1)
+                except (ValueError, TypeError, OverflowError):
+                    pass
+        return cls('Duck.ai request failed at {stage} (HTTP {status})'.format(
+            stage=stage, status=response.status_code), status=response.status_code,
+            stage=stage, provider_code=code, retry_after=retry_after)
 
 
 # ─────────────────────────── image / file helpers ───────────────────────────
@@ -255,11 +286,15 @@ class DuckAI:
 
     def bootstrap(self):
         r = self.s.get(_BASE + "/", timeout=self.timeout)
-        r.raise_for_status()
-        tag = re.search(r'data-version-tag="([^"]*)"', r.text)
-        sha = re.search(r'data-version-sha="([^"]*)"', r.text)
-        self.fe_version = "{t}-{s}".format(t=tag.group(1) if tag else "dev",
-                                           s=sha.group(1) if sha else "hash")
+        try:
+            if r.status_code != 200:
+                raise DuckAIError.from_response(r, 'bootstrap')
+            tag = re.search(r'data-version-tag="([^"]*)"', r.text)
+            sha = re.search(r'data-version-sha="([^"]*)"', r.text)
+            self.fe_version = "{t}-{s}".format(t=tag.group(1) if tag else "dev",
+                                               s=sha.group(1) if sha else "hash")
+        finally:
+            r.close()
         return self
 
     def fetch_challenge(self) -> str:
@@ -270,12 +305,15 @@ class DuckAI:
                      "Origin": _BASE, "Referer": _BASE + "/"},
             timeout=self.timeout,
         )
-        raw = r.headers.get("x-vqd-hash-1")
-        if not raw:
-            raise DuckAIError(_("No challenge received (HTTP {code}): {t}")
-                              .format(code=r.status_code, t=r.text[:200]),
-                              status=r.status_code)
-        return base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+        try:
+            if r.status_code != 200:
+                raise DuckAIError.from_response(r, 'status')
+            raw = r.headers.get("x-vqd-hash-1")
+            if not raw:
+                raise DuckAIError('Duck.ai returned no challenge', status=r.status_code, stage='status')
+            return base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+        finally:
+            r.close()
 
     def solve(self, js_source: str) -> dict:
         """Run the challenge with Node + jsdom."""
@@ -332,9 +370,15 @@ class DuckAI:
         return b64_json(proof)
 
     def rehandshake(self):
-        """Fetch a fresh challenge (fixes transient 418 responses)."""
+        """Initialize the current conversation's protocol state."""
         self.bootstrap()
-        self.jsa = self.build_proof(self.solve(self.fetch_challenge()))
+        challenge = self.fetch_challenge()
+        try:
+            self.jsa = self.build_proof(self.solve(challenge))
+        except DuckAIError as error:
+            if error.stage is None:
+                error.stage = 'solver'
+            raise
 
     # ────────── chat ──────────
 
@@ -386,8 +430,9 @@ class DuckAI:
              ("tool", dict)           — tool call (GenerateImage/WebSearch/...)
            Errors raise DuckAIError."""
         r = None
-        last = ""
+        last = None
         status = None
+        reused_proof = bool(self.fe_version and self.jsa)
         for attempt in range(retries):
             if attempt:
                 self.rehandshake()
@@ -399,16 +444,25 @@ class DuckAI:
             if r.status_code == 200:
                 break
             status = r.status_code
-            last = "HTTP {c}: {t}".format(c=r.status_code, t=r.text[:200])
+            last = DuckAIError.from_response(r, 'chat')
             r.close()
+            # A previously accepted conversation proof may expire. Refresh it once,
+            # as the CLI does, only for this explicit protocol error. A newly fetched
+            # proof rejected on the first request is not replayed. Honor Retry-After.
+            if (r.status_code == 418 and last.provider_code == 'ERR_CHALLENGE'
+                    and reused_proof and attempt == 0 and attempt + 1 < retries
+                    and last.retry_after is None):
+                reused_proof = False
+                continue
             # Invalid requests and usage limits cannot be fixed by replaying them.
-            if r.status_code not in {408, 418, 500, 502, 503, 504}:
-                raise DuckAIError(last, status=status)
+            if r.status_code not in {408, 500, 502, 503, 504}:
+                raise last
             if attempt + 1 < retries:
                 time.sleep(2 + attempt * 2)
         else:
-            raise DuckAIError(_("Chat failed after {n} attempts: {e}")
-                              .format(n=retries, e=last), status=status)
+            if last is not None:
+                raise last
+            raise DuckAIError('Chat requires at least one attempt', stage='chat')
 
         try:
             for raw in r.iter_lines():
@@ -427,7 +481,9 @@ class DuckAI:
                 if ev.get("action") == "error":
                     raise DuckAIError(
                         _("Server error ({status}): {t}")
-                        .format(status=ev.get("status"), t=ev.get("type", "?")))
+                        .format(status=ev.get("status"), t='upstream error'),
+                        status=ev.get('status') if isinstance(ev.get('status'), int) else None,
+                        stage='stream')
                 role = ev.get("role", "")
                 name = ev.get("name", "")
                 # answer text
