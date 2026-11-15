@@ -117,6 +117,24 @@ class PersonaFlowTests(unittest.TestCase):
         self.client.text_stream.assert_not_called()
         self.reader.search.assert_not_called()
 
+    def test_general_geography_and_history_do_not_require_recent_news(self):
+        for text in ('پایتخت ایران کجاست؟', 'ترامپ کجا به دنیا آمده؟', 'جنگ جهانی دوم چه زمانی بود؟'):
+            with self.subTest(text=text):
+                self.send(text)
+                self.assertEqual(self.client.text_stream.call_args.args[0], text)
+        self.reader.search.assert_not_called()
+
+    def test_photo_still_gets_analysed_if_news_coverage_is_missing(self):
+        self.reader.search.return_value = []
+        self.send('این عکس از حمله چه چیزی نشان می‌دهد؟', photo=[{'file_id':'example'}])
+        self.assertTrue(self.client.text_stream.call_args.kwargs['images'])
+
+    def test_start_discloses_identity_without_repeating_intro_afterwards(self):
+        self.send('/start')
+        self.assertIn(persona.IDENTITY, self.api.sent[-1][1])
+        self.send('سلام')
+        self.assertNotIn(persona.INTRO, self.api.sent[-1][1])
+
     def test_news_context_sources_and_followup_are_wired_to_response(self):
         self.client.text_stream.return_value = [('message', 'طبق گزارش [1] مذاکرات ادامه دارد.')]
         self.send('اخبار ایران چیست؟')

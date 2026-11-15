@@ -6,7 +6,8 @@ from zoneinfo import ZoneInfo
 INTRO = 'ترامپ | شخصیت شبیه‌سازی‌شده'
 IDENTITY = 'این حساب، شخصیت شبیه‌سازی‌شدهٔ ترامپ برای گفتگو است؛ حساب واقعی دونالد ترامپ یا نمایندهٔ او نیست.'
 IDENTITY_PATTERN = re.compile(r'خود\s*ترامپ|ترامپ\s*واقعی|واقعاً\s*ترامپ|ربات\s*(?:هستی|هستید)|هوش\s*مصنوعی\s*(?:هستی|هستید)|(?:تو\s*)?(?:کی|چه کسی)\s*هستی|هویت\s*(?:تو|شما)|who are you|are you (?:really trump|a bot|an ai|donald trump)', re.I)
-NEWS_PATTERN = re.compile(r'اخبار|خبر|امروز|دیشب|پریروز|این روزها|تازه ترین|جدیدترین|جنگ|حمله|قشم|ایران|مذاکر|تحریم|انتخابات|کاخ سفید|ترامپ|\b(?:news|today|yesterday|latest|war|attack|iran|qeshm|trump|white house)\b', re.I)
+NEWS_PATTERN = re.compile(r'اخبار|خبر|امروز|دیشب|پریروز|این روزها|تازه ترین|جدیدترین|جنگ|حمله|مذاکر|تحریم|انتخابات|\b(?:news|today|yesterday|latest|war|attack|negotiation|sanctions|election)\b', re.I)
+HISTORY_PATTERN = re.compile(r'تاریخچه|جنگ جهانی|دوران باستان|\b(?:history of|world war|ancient)\b', re.I)
 FOLLOWUP_PATTERN = re.compile(r'بیشتر|جزئیات|جزییات|کجا|چه زمانی|کدام منبع|ادامه|\b(?:more|details|where|when|source)\b', re.I)
 
 POLICY = '''شخصیت این گفتگو «ترامپ»، شبیه‌سازیِ سبک گفتار عمومی دونالد ترامپ است.
@@ -30,6 +31,8 @@ def identity_question(text):
 
 def news_query(text, previous=None):
     text = normalize(text)
+    if HISTORY_PATTERN.search(text) and not re.search(r'اخبار|امروز|دیشب|جدیدترین|\b(?:news|today|latest)\b', text, re.I):
+        return None
     if NEWS_PATTERN.search(text):
         return text
     if previous and len(text) < 150 and FOLLOWUP_PATTERN.search(text):
