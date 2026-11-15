@@ -1,0 +1,284 @@
+"""Telegram adapter for the repository's DuckAI text, vision and image APIs."""
+import hashlib
+import hmac
+import json
+import logging
+import os
+import tempfile
+import threading
+import time
+from pathlib import Path
+
+import requests
+
+from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
+
+log = logging.getLogger(__name__)
+DEFAULT_MODEL = MODELS['luna']
+MODEL_IDS = list(dict.fromkeys(MODELS[k] for k in ('luna', 'mini', 'haiku', 'mistral', 'oss', 'gemma')))
+VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
+MAX_FILE_BYTES = 15 * 1024 * 1024
+HELP = ('سلام! متن بفرست تا گفتگو کنیم.\n'
+        '📷 عکس را با سؤال در کپشن بفرست؛ یا روی عکس ریپلای کن و سؤالت را بنویس.\n'
+        '🎨 ساخت تصویر: /draw یک گربه فضانورد روی ماه\n'
+        '/models انتخاب مدل\n/clear پاک‌کردن گفتگوی فعلی')
+
+
+def webhook_secret(token):
+    return hashlib.sha256((token + 'duck-webhook').encode()).hexdigest()[:32]
+
+
+def authorized(token, supplied):
+    return (bool(token) and isinstance(supplied, str) and len(supplied) == 32
+            and all(character in '0123456789abcdef' for character in supplied)
+            and hmac.compare_digest(webhook_secret(token), supplied))
+
+
+class UserInputError(ValueError):
+    pass
+
+
+class TelegramError(RuntimeError):
+    pass
+
+
+class RemoteDuckAI(DuckAI):
+    """Python Vercel functions delegate the existing jsdom runner to Node."""
+    def __init__(self, token, solver_url='https://duckai-telegram-bot.vercel.app/api/solve'):
+        super().__init__(timeout=(8, 85))
+        self.token = token
+        self.solver_url = solver_url
+
+    def solve(self, js_source):
+        secret = hashlib.sha256((self.token + 'duckai-solver').encode()).hexdigest()
+        with requests.post(self.solver_url, json={'source': js_source, 'ua': self.ua},
+                           headers={'x-duckai-solver': secret}, timeout=(8, 30)) as response:
+            if response.status_code != 200:
+                raise DuckAIError('Challenge solver unavailable', status=response.status_code)
+            result = response.json()
+        if not isinstance(result, dict) or not isinstance(result.get('client_hashes'), list):
+            raise DuckAIError('Invalid challenge solver response')
+        return result
+
+
+class TelegramAPI:
+    def __init__(self, token):
+        self.token = token
+        self.base = 'https://api.telegram.org/bot' + token + '/'
+
+    def call(self, method, payload, files=None):
+        if not self.token:
+            raise TelegramError('Bot is not configured')
+        kwargs = {'data': payload, 'files': files} if files else {'json': payload}
+        with requests.post(self.base + method, timeout=(8, 35), **kwargs) as response:
+            if not response.ok:
+                raise TelegramError('Telegram request failed')
+            data = response.json()
+        if not data.get('ok'):
+            raise TelegramError('Telegram rejected request')
+        return data.get('result')
+
+    def send(self, chat_id, text, reply_to=None, markup=None):
+        # Telegram counts UTF-16 units. 1900 Unicode code points fit even for emoji.
+        text = str(text or 'پاسخی دریافت نشد.')
+        chunks = [text[i:i + 1900] for i in range(0, len(text), 1900)]
+        for index, chunk in enumerate(chunks):
+            payload = {'chat_id': chat_id, 'text': chunk}
+            if reply_to and index == 0:
+                payload['reply_parameters'] = {'message_id': reply_to, 'allow_sending_without_reply': True}
+            if markup and index == len(chunks) - 1:
+                payload['reply_markup'] = markup
+            self.call('sendMessage', payload)
+
+    def action(self, chat_id, action):
+        try:
+            self.call('sendChatAction', {'chat_id': chat_id, 'action': action})
+        except (requests.RequestException, TelegramError):
+            pass
+
+    def download(self, attachment):
+        if attachment.get('file_size', 0) > MAX_FILE_BYTES:
+            raise UserInputError('حجم عکس باید کمتر از ۱۵ مگابایت باشد.')
+        info = self.call('getFile', {'file_id': attachment['file_id']})
+        path = info.get('file_path', '')
+        if not path or path.startswith(('/', '\\')) or '..' in path.split('/') or '://' in path:
+            raise TelegramError('Invalid Telegram file path')
+        if info.get('file_size', 0) > MAX_FILE_BYTES:
+            raise UserInputError('حجم عکس باید کمتر از ۱۵ مگابایت باشد.')
+        data = bytearray()
+        with requests.get('https://api.telegram.org/file/bot' + self.token + '/' + path,
+                          stream=True, timeout=(8, 30)) as response:
+            if not response.ok:
+                raise TelegramError('Photo download failed')
+            for chunk in response.iter_content(64 * 1024):
+                data.extend(chunk)
+                if len(data) > MAX_FILE_BYTES:
+                    raise UserInputError('حجم عکس باید کمتر از ۱۵ مگابایت باشد.')
+        return bytes(data)
+
+    def photo(self, chat_id, path, reply_to=None):
+        payload = {'chat_id': chat_id}
+        if reply_to:
+            payload['reply_parameters'] = json.dumps({'message_id': reply_to, 'allow_sending_without_reply': True})
+        with open(path, 'rb') as image:
+            self.call('sendPhoto', payload, files={'photo': (Path(path).name, image, 'image/jpeg')})
+
+
+def attachment_from(message):
+    photos = message.get('photo') or []
+    if photos:
+        return max(photos, key=lambda p: p.get('width', 0) * p.get('height', 0))
+    document = message.get('document') or {}
+    if document.get('mime_type', '').startswith('image/'):
+        return document
+    return None
+
+
+def keyboard():
+    return {'inline_keyboard': [[{'text': model, 'callback_data': 'model:' + model}] for model in MODEL_IDS]}
+
+
+class Bot:
+    def __init__(self, api, client_factory=None):
+        self.api = api
+        self.client_factory = client_factory or (lambda: RemoteDuckAI(api.token))
+        self.sessions = {}
+        self.updates = {}
+        self.lock = threading.Lock()
+
+    def session(self, message):
+        key = (message['chat']['id'], message.get('from', {}).get('id', message['chat']['id']))
+        with self.lock:
+            now = time.monotonic()
+            for old_key, item in list(self.sessions.items()):
+                if now - item['used'] > 1800 and not item['lock'].locked():
+                    del self.sessions[old_key]
+            if key not in self.sessions:
+                if len(self.sessions) >= 256:
+                    idle = next((k for k, v in self.sessions.items() if not v['lock'].locked()), None)
+                    if idle is None:
+                        raise TelegramError('Bot is busy')
+                    del self.sessions[idle]
+                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'lock': threading.Lock(), 'used': now}
+            self.sessions[key]['used'] = now
+            return self.sessions[key]
+
+    def handle_update(self, update):
+        update_id = update.get('update_id')
+        with self.lock:
+            now = time.monotonic()
+            self.updates = {k: v for k, v in self.updates.items() if now - v < 600}
+            if update_id is not None and update_id in self.updates:
+                return
+            if update_id is not None:
+                self.updates[update_id] = now
+        message = update.get('message')
+        callback = update.get('callback_query')
+        if callback:
+            message = callback.get('message')
+            if not message:
+                return
+            message = dict(message, **{'from': callback.get('from', {})})
+        if not message or 'chat' not in message:
+            return
+        session = self.session(message)
+        with session['lock']:
+            if callback:
+                self.callback(callback, message, session)
+            else:
+                self.message(message, session)
+
+    def callback(self, callback, message, session):
+        model = callback.get('data', '').removeprefix('model:')
+        valid = callback.get('data', '').startswith('model:') and model in MODEL_IDS
+        self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'],
+                                            'text': 'مدل انتخاب شد' if valid else 'مدل نامعتبر است'})
+        if valid:
+            session.update(model=model, history=[])
+            self.api.send(message['chat']['id'], 'مدل فعلی: ' + model)
+
+    def message(self, message, session):
+        chat_id = message['chat']['id']
+        reply_to = message.get('message_id')
+        text = (message.get('text') or message.get('caption') or '').strip()
+        parts = text.split(maxsplit=1)
+        command = parts[0] if parts else ''
+        argument = parts[1] if len(parts) > 1 else ''
+        command = command.split('@')[0].lower()
+        if command in ('/start', '/help'):
+            self.api.send(chat_id, HELP, reply_to)
+            return
+        if command in ('/clear', '/new'):
+            session['history'] = []
+            self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
+            return
+        if command in ('/models', '/model'):
+            self.api.send(chat_id, 'مدل فعلی: ' + session['model'], reply_to, keyboard())
+            return
+        draw = command in ('/draw', '/image')
+        if draw and not argument.strip():
+            self.api.send(chat_id, 'توضیح تصویر را بنویس؛ مثلاً:\n/draw یک گربه فضانورد روی ماه', reply_to)
+            return
+        attachment = attachment_from(message)
+        if not attachment and text and not draw:
+            attachment = attachment_from(message.get('reply_to_message') or {})
+        if not text and not attachment:
+            self.api.send(chat_id, 'متن یا عکس بفرست. ساخت تصویر: /draw توضیح تصویر', reply_to)
+            return
+        client = self.client_factory()
+        try:
+            if draw:
+                self.api.action(chat_id, 'upload_photo')
+                # Use the repository's GenerateImage event parser and writable temp storage.
+                with tempfile.TemporaryDirectory(prefix='duckai-image-') as directory:
+                    path, companion, _ = client.generate_image(argument.strip(), model=DEFAULT_MODEL,
+                                                               out_dir=directory, retries=2)
+                    from PIL import Image
+                    with Image.open(path) as generated:
+                        generated.load()
+                        generated = generated.convert('RGB')
+                        generated.thumbnail((2048, 2048))
+                        upload = str(Path(directory) / 'duckai-generated.jpg')
+                        generated.save(upload, 'JPEG', quality=90)
+                    self.api.photo(chat_id, upload, reply_to)
+                    if companion.strip():
+                        self.api.send(chat_id, companion, reply_to)
+                log.info('image_generation_completed')
+                return
+            self.api.action(chat_id, 'typing')
+            images = None
+            model = session['model']
+            if attachment:
+                raw = self.api.download(attachment)
+                from PIL import Image
+                import io
+                with Image.open(io.BytesIO(raw)) as incoming:
+                    if incoming.width * incoming.height > 25_000_000:
+                        raise UserInputError('ابعاد عکس بیش از حد بزرگ است؛ عکس کوچک‌تری بفرست.')
+                    incoming.verify()
+                with tempfile.TemporaryDirectory(prefix='duckai-vision-') as directory:
+                    path = Path(directory) / 'input-image'
+                    path.write_bytes(raw)
+                    images = [image_to_data_url(str(path))]
+                if model not in VISION_MODELS:
+                    model = DEFAULT_MODEL
+                    self.api.send(chat_id, 'برای تحلیل عکس از مدل ' + model + ' استفاده می‌کنم.', reply_to)
+            prompt = text or 'این تصویر را به فارسی توضیح بده.'
+            history = session['history'] if model == session['model'] else []
+            answer = client.ask(prompt, model=model, history=history, images=images, retries=1)
+            self.api.send(chat_id, answer, reply_to)
+            # Retain bounded text context; uploaded image bytes are not cached in process memory.
+            session['history'] = (history + [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}]},
+                                            {'role': 'assistant', 'content': answer}])[-12:]
+            log.info('vision_completed' if attachment else 'text_completed')
+        except UserInputError as error:
+            self.api.send(chat_id, str(error), reply_to)
+        except Exception as error:
+            # Exception strings can contain a Telegram token or an image payload: never log them.
+            log.warning('request_failed type=%s status=%s', type(error).__name__, getattr(error, 'status', None))
+            if getattr(error, 'status', None) in (418, 429):
+                self.api.send(chat_id, 'سرویس هوش مصنوعی موقتاً درخواست را محدود کرده است. کمی بعد دوباره تلاش کن.', reply_to)
+            else:
+                self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
+        finally:
+            client.s.close()
