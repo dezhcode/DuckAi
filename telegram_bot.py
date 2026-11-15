@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -56,10 +57,10 @@ class RemoteDuckAI(DuckAI):
         with requests.post(self.solver_url, json={'source': js_source, 'ua': self.ua},
                            headers={'x-duckai-solver': secret}, timeout=(8, 30)) as response:
             if response.status_code != 200:
-                raise DuckAIError('Challenge solver unavailable', status=response.status_code)
+                raise DuckAIError.from_response(response, 'solver')
             result = response.json()
         if not isinstance(result, dict) or not isinstance(result.get('client_hashes'), list):
-            raise DuckAIError('Invalid challenge solver response')
+            raise DuckAIError('Invalid challenge solver response', stage='solver')
         return result
 
 
@@ -167,6 +168,23 @@ class Bot:
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
+        self.ai_gate = threading.BoundedSemaphore(1)
+        self.ai_not_before = 0
+        self.limit_status = None
+        self.limit_code = None
+
+    @staticmethod
+    def close_client(session):
+        client = session.get('client')
+        if client is not None:
+            client.s.close()
+            session['client'] = None
+
+    def limit_message(self, seconds):
+        reason = ('اعتبارسنجی اتصال با Duck.ai ناموفق بود.' if self.limit_code == 'ERR_CHALLENGE'
+                  else 'Duck.ai محدودیت استفاده اعلام کرده است.' if self.limit_status == 429
+                  else 'Duck.ai درخواست را نپذیرفت.')
+        return reason + ' برای جلوگیری از درخواست‌های تکراری، ' + str(seconds) + ' ثانیه دیگر دوباره امتحان کن.'
 
     def session(self, message):
         key = (message['chat']['id'], message.get('from', {}).get('id', message['chat']['id']))
@@ -174,14 +192,17 @@ class Bot:
             now = time.monotonic()
             for old_key, item in list(self.sessions.items()):
                 if now - item['used'] > 1800 and not item['lock'].locked():
+                    self.close_client(item)
                     del self.sessions[old_key]
             if key not in self.sessions:
                 if len(self.sessions) >= 256:
                     idle = next((k for k, v in self.sessions.items() if not v['lock'].locked()), None)
                     if idle is None:
                         raise TelegramError('Bot is busy')
+                    self.close_client(self.sessions[idle])
                     del self.sessions[idle]
-                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'lock': threading.Lock(), 'used': now}
+                self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'client': None,
+                                      'lock': threading.Lock(), 'used': now}
             self.sessions[key]['used'] = now
             return self.sessions[key]
 
@@ -216,6 +237,7 @@ class Bot:
         self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'],
                                             'text': 'مدل انتخاب شد' if valid else 'مدل نامعتبر است'})
         if valid:
+            self.close_client(session)
             session.update(model=model, history=[])
             self.api.send(message['chat']['id'], 'مدل فعلی: ' + model)
 
@@ -231,6 +253,7 @@ class Bot:
             self.api.send(chat_id, HELP, reply_to)
             return
         if command in ('/clear', '/new'):
+            self.close_client(session)
             session['history'] = []
             self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
             return
@@ -251,8 +274,24 @@ class Bot:
         draw = draw or (attachment is None and is_image_request(text))
         prompt = argument.strip() if command in ('/draw', '/image') else text
         prompt = prompt or 'این تصویر را به فارسی توضیح بده.'
-        client = self.client_factory()
+        with self.lock:
+            remaining = math.ceil(self.ai_not_before - time.monotonic())
+        if remaining > 0:
+            self.api.send(chat_id, self.limit_message(remaining), reply_to)
+            return
+        if not self.ai_gate.acquire(blocking=False):
+            self.api.send(chat_id, 'ربات در حال پردازش درخواست دیگری است؛ کمی بعد دوباره بفرست.', reply_to)
+            return
         try:
+            # Another request may have entered cooldown while this one acquired the gate.
+            with self.lock:
+                remaining = math.ceil(self.ai_not_before - time.monotonic())
+            if remaining > 0:
+                self.api.send(chat_id, self.limit_message(remaining), reply_to)
+                return
+            if session['client'] is None:
+                session['client'] = self.client_factory()
+            client = session['client']
             self.api.action(chat_id, 'typing')
             images = None
             model = session['model']
@@ -279,7 +318,7 @@ class Bot:
             # repository events so the provider can generate images without a slash command.
             for kind, value in client.stream_events(prompt, model=DEFAULT_MODEL if draw else model,
                                                    history=history, images=images, draw=draw,
-                                                   retries=2 if draw else 1):
+                                                   retries=2):
                 if kind == 'message':
                     text_parts.append(value)
                 elif kind == 'image':
@@ -304,13 +343,21 @@ class Bot:
             self.api.send(chat_id, str(error), reply_to)
         except Exception as error:
             # Exception strings can contain a Telegram token or an image payload: never log them.
-            log.warning('request_failed type=%s status=%s', type(error).__name__, getattr(error, 'status', None))
+            log.warning('request_failed type=%s status=%s stage=%s provider_code=%s retry_after=%s',
+                        type(error).__name__, getattr(error, 'status', None),
+                        getattr(error, 'stage', None), getattr(error, 'provider_code', None),
+                        getattr(error, 'retry_after', None))
             if getattr(error, 'status', None) in (418, 429):
-                self.api.send(chat_id, 'سرویس هوش مصنوعی موقتاً درخواست را محدود کرده است. کمی بعد دوباره تلاش کن.', reply_to)
+                seconds = max(30, getattr(error, 'retry_after', None) or 0)
+                with self.lock:
+                    self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
+                    self.limit_status = error.status
+                    self.limit_code = getattr(error, 'provider_code', None)
+                self.api.send(chat_id, self.limit_message(seconds), reply_to)
             else:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
-            client.s.close()
+            self.ai_gate.release()
 
     def upload_generated(self, chat_id, generated, reply_to):
         from PIL import Image

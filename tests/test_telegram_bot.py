@@ -206,6 +206,82 @@ class BotFlowTests(unittest.TestCase):
         second = self.bot.session(dict(self.message, **{'from': {'id': 35}}))
         self.assertIsNot(first, second)
 
+    def test_conversation_reuses_client_cookies_and_connection(self):
+        factory = Mock(return_value=self.client)
+        self.bot.client_factory = factory
+        self.client.s.cookies.set('fixture', 'cookie-state')
+        with patch.object(self.client.s, 'close') as close:
+            self.run_message(text='سلام')
+            self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='ادامه بده')})
+            factory.assert_called_once()
+            close.assert_not_called()
+        self.assertEqual(self.client.s.cookies.get('fixture'), 'cookie-state')
+        self.assertIs(self.bot.session(self.message)['client'], self.client)
+        self.assertEqual(self.client.text_stream.call_count, 2)
+
+    def test_clear_closes_client_and_resets_conversation(self):
+        self.run_message(text='سلام')
+        with patch.object(self.client.s, 'close') as close:
+            self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='/clear')})
+            close.assert_called_once()
+        session = self.bot.session(self.message)
+        self.assertIsNone(session['client'])
+        self.assertEqual(session['history'], [])
+
+    def test_upstream_retry_after_blocks_repeated_calls_and_preserves_client(self):
+        clock = [100.0]
+        self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat', retry_after=120)
+        with patch.object(telegram.time, 'monotonic', side_effect=lambda: clock[0]):
+            self.run_message(text='سلام')
+            clock[0] = 110
+            self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='دوباره')})
+            self.assertEqual(self.client.text_stream.call_count, 1)
+            self.assertIn('110', self.api.sent[-1][1])
+            self.client.text_stream.side_effect = None
+            clock[0] = 221
+            self.bot.handle_update({'update_id': 3, 'message': dict(self.message, text='ادامه')})
+            self.assertEqual(self.client.text_stream.call_count, 2)
+            self.assertIs(self.bot.session(self.message)['client'], self.client)
+
+    def test_new_chat_does_not_cancel_cooldown(self):
+        self.bot.ai_not_before = telegram.time.monotonic() + 120
+        self.run_message(text='/clear')
+        self.bot.handle_update({'update_id': 2, 'message': dict(self.message, text='سلام')})
+        self.client.text_stream.assert_not_called()
+
+    def test_busy_instance_does_not_start_another_upstream_request(self):
+        self.bot.ai_gate.acquire()
+        try:
+            self.run_message(text='سلام')
+            self.client.text_stream.assert_not_called()
+            self.assertIn('در حال پردازش', self.api.sent[-1][1])
+        finally:
+            self.bot.ai_gate.release()
+
+    def test_expired_conversation_closes_its_connection(self):
+        self.run_message(text='سلام')
+        first = self.bot.session(self.message)
+        first['used'] = telegram.time.monotonic() - 1801
+        with patch.object(self.client.s, 'close') as close:
+            self.bot.session(dict(self.message, **{'from': {'id': 99}}))
+            close.assert_called_once()
+
+    def test_error_log_has_stage_without_provider_message_or_token(self):
+        self.client.text_stream.side_effect = telegram.DuckAIError('secret prompt and token', status=418,
+                                                                  stage='chat', provider_code='ERR_LIMIT')
+        with self.assertLogs('telegram_bot', level='WARNING') as logs:
+            self.run_message(text='سلام')
+        self.assertIn('stage=chat', logs.output[0])
+        self.assertIn('provider_code=ERR_LIMIT', logs.output[0])
+        self.assertNotIn('secret prompt', logs.output[0])
+
+    def test_challenge_failure_is_not_labelled_as_a_confirmed_usage_limit(self):
+        self.client.text_stream.side_effect = telegram.DuckAIError('reject', status=418, stage='chat',
+                                                                  provider_code='ERR_CHALLENGE')
+        self.run_message(text='سلام')
+        self.assertIn('اعتبارسنجی', self.api.sent[-1][1])
+        self.assertNotIn('محدودیت استفاده', self.api.sent[-1][1])
+
 
 class TelegramTransportTests(unittest.TestCase):
     def test_invalid_webhook_secret_is_rejected_without_throwing(self):
