@@ -97,6 +97,8 @@ _FA.update({
     "Image file not found: {path}": "فایل تصویر پیدا نشد: {path}",
     "Image is too large and Pillow is not installed: {path}":
         "تصویر خیلی بزرگ است و Pillow نصب نیست: {path}",
+    "Pillow is required to convert non-WebP images":
+        "برای تبدیل تصویرهایی که WebP نیستند، Pillow باید نصب باشد",
     "Failed to open image ({path}): {e}": "بازکردن تصویر ناموفق ({path}): {e}",
     "Image is still too large after compression: {path}":
         "تصویر پس از فشرده‌سازی همچنان بزرگ است: {path}",

@@ -1,0 +1,42 @@
+{
+  "name": "duckai-telegram-bot",
+  "project": "prj_M41tkdnwEbxA9zfUbV4XqfSFTMZI",
+  "files": [
+    {
+      "file": "api/webhook.py",
+      "sha": "d211fef3115995de7dab79056d1bf29ea4ee31d4"
+    },
+    {
+      "file": "api/solve.js",
+      "sha": "ba4e9c8c467f72128ef13b7a0424f38ad3aee4fa"
+    },
+    {
+      "file": "duck_cli.py",
+      "sha": "b781a5c90e20c64d8eda4c59a5f00e592e46dfff"
+    },
+    {
+      "file": "duck_i18n.py",
+      "sha": "2ebaf539c73f092f39ae698dabb68a6bcb09d009"
+    },
+    {
+      "file": "package.json",
+      "sha": "28d3d7b0650909c66507fcb9f45b0af2f00c610c"
+    },
+    {
+      "file": "requirements.txt",
+      "sha": "95af29123cc83831eb6d38829b6d472d16fdd83a"
+    },
+    {
+      "file": "vercel.json",
+      "data": "{\"functions\":{\"api/*.py\":{\"maxDuration\":60},\"api/*.js\":{\"maxDuration\":60}},\"headers\":[{\"source\":\"/api/(.*)\",\"headers\":[{\"key\":\"Cache-Control\",\"value\":\"no-store\"}]}]}"
+    },
+    {
+      "file": "index.html",
+      "data": "<!doctype html><html lang=\"fa\" dir=\"rtl\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>DuckAI Telegram Bot</title><body><h1>DuckAI Telegram Bot</h1><p>سرویس وب‌هوک تلگرام</p><p><a href=\"/api/webhook\">بررسی وضعیت وب‌هوک</a></p></body></html>"
+    }
+  ],
+  "projectSettings": {
+    "framework": null,
+    "rootDirectory": null
+  }
+}

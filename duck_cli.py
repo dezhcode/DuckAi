@@ -158,13 +158,16 @@ def image_to_data_url(path: str) -> dict:
         # Without Pillow only raw WebP files can be sent as-is
         with open(path, "rb") as fh:
             raw = fh.read()
-        if len(raw) > IMG_MAX_PAYLOAD:
+        if raw[:4] != b"RIFF" or raw[8:12] != b"WEBP":
+            raise DuckAIError(_("Pillow is required to convert non-WebP images"))
+        data_url = "data:image/webp;base64," + b64(raw)
+        if len(data_url) > IMG_MAX_PAYLOAD:
             raise DuckAIError(_("Image is too large and Pillow is not installed: {path}")
                               .format(path=path))
         return {
             "type": "image",
             "mimeType": "image/webp",
-            "image": "data:image/webp;base64," + b64(raw),
+            "image": data_url,
         }
     try:
         im = Image.open(path)
@@ -190,12 +193,12 @@ def image_to_data_url(path: str) -> dict:
     data = buf.getvalue()
     # if still too big, step the quality down
     q = IMG_WEBP_QUALITY
-    while len(data) > IMG_MAX_PAYLOAD and q > 30:
+    while len("data:image/webp;base64,") + 4 * ((len(data) + 2) // 3) > IMG_MAX_PAYLOAD and q > 30:
         q -= 15
         buf = io.BytesIO()
         im.save(buf, "WEBP", quality=q)
         data = buf.getvalue()
-    if len(data) > IMG_MAX_PAYLOAD:
+    if len("data:image/webp;base64,") + 4 * ((len(data) + 2) // 3) > IMG_MAX_PAYLOAD:
         raise DuckAIError(_("Image is still too large after compression: {path}")
                           .format(path=path))
     return {
@@ -213,7 +216,7 @@ def file_to_prompt_chunk(path: str, max_chars: int = 60_000) -> str:
     """Inline a text/code file into the prompt as a fenced code block."""
     if not os.path.isfile(path):
         raise DuckAIError(_("File not found: {path}").format(path=path))
-    ext = os.path.splitext(path)[1].lower().lstrip(".")
+    ext = os.path.splitext(path)[1].lower()
     mime_guess = mimetypes.guess_type(path)[0] or ""
     if not (ext in _TEXT_EXTS or mime_guess.startswith("text/") or ext == ""):
         raise DuckAIError(
@@ -221,7 +224,7 @@ def file_to_prompt_chunk(path: str, max_chars: int = 60_000) -> str:
               "text; binary files cannot be sent.").format(name=os.path.basename(path)))
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            content = fh.read()
+            content = fh.read(max_chars + 1)
     except OSError as e:
         raise DuckAIError(_("Failed to read file ({path}): {e}").format(path=path, e=e))
     trunc = ""
@@ -230,7 +233,7 @@ def file_to_prompt_chunk(path: str, max_chars: int = 60_000) -> str:
         trunc = _("\n\n[The file was long and got truncated to {max} characters]").format(
             max=max_chars)
     name = os.path.basename(path)
-    lang = ext if ext else "text"
+    lang = ext.lstrip(".") if ext else "text"
     return _("\n\nContent of file '{name}':\n```{lang}\n{content}\n```{trunc}\n").format(
         name=name, lang=lang, content=content, trunc=trunc)
 
@@ -397,62 +400,69 @@ class DuckAI:
                 break
             status = r.status_code
             last = "HTTP {c}: {t}".format(c=r.status_code, t=r.text[:200])
-            # 418 = DDG anti-abuse score; a fresh challenge usually fixes it
-            time.sleep(2 + attempt * 2)
+            r.close()
+            # Invalid requests and usage limits cannot be fixed by replaying them.
+            if r.status_code not in {408, 418, 500, 502, 503, 504}:
+                raise DuckAIError(last, status=status)
+            if attempt + 1 < retries:
+                time.sleep(2 + attempt * 2)
         else:
             raise DuckAIError(_("Chat failed after {n} attempts: {e}")
                               .format(n=retries, e=last), status=status)
 
-        for raw in r.iter_lines():
-            if not raw:
-                continue
-            line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
-            if not line.startswith("data: "):
-                continue
-            payload = line[6:]
-            if payload.startswith("["):  # [PING] / [DONE] / [CHAT_TITLE:...]
-                continue
-            try:
-                ev = json.loads(payload)
-            except json.JSONDecodeError:
-                continue
-            if ev.get("action") == "error":
-                raise DuckAIError(
-                    _("Server error ({status}): {t}")
-                    .format(status=ev.get("status"), t=ev.get("type", "?")))
-            role = ev.get("role", "")
-            name = ev.get("name", "")
-            # answer text
-            msg = ev.get("message")
-            if isinstance(msg, str) and msg:
-                yield ("message", msg)
-                continue
-            # image-generation events
-            if role == "ui-component" and name == "generate-image":
-                data = ev.get("data") or {}
-                dtype = data.get("type")
-                if dtype == "image-title":
-                    yield ("image_title", data.get("title", ""))
+        try:
+            for raw in r.iter_lines():
+                if not raw:
                     continue
-                if dtype == "image-partial" or data.get("status") == "partial":
-                    yield ("image_partial", data)
+                line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+                if not line.startswith("data: "):
                     continue
-                if data.get("status") == "success" and data.get("b64Image"):
-                    yield ("image", {
-                        "b64": data["b64Image"],
-                        "width": data.get("width"),
-                        "height": data.get("height"),
-                        "format": data.get("format", "jpeg"),
+                payload = line[6:]
+                if payload.startswith("["):  # [PING] / [DONE] / [CHAT_TITLE:...]
+                    continue
+                try:
+                    ev = json.loads(payload)
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("action") == "error":
+                    raise DuckAIError(
+                        _("Server error ({status}): {t}")
+                        .format(status=ev.get("status"), t=ev.get("type", "?")))
+                role = ev.get("role", "")
+                name = ev.get("name", "")
+                # answer text
+                msg = ev.get("message")
+                if isinstance(msg, str) and msg:
+                    yield ("message", msg)
+                    continue
+                # image-generation events
+                if role == "ui-component" and name == "generate-image":
+                    data = ev.get("data") or {}
+                    dtype = data.get("type")
+                    if dtype == "image-title":
+                        yield ("image_title", data.get("title", ""))
+                        continue
+                    if dtype == "image-partial" or data.get("status") == "partial":
+                        yield ("image_partial", data)
+                        continue
+                    if data.get("status") == "success" and data.get("b64Image"):
+                        yield ("image", {
+                            "b64": data["b64Image"],
+                            "width": data.get("width"),
+                            "height": data.get("height"),
+                            "format": data.get("format", "jpeg"),
+                        })
+                        continue
+                # tool calls
+                if role == "tool-invocation":
+                    yield ("tool", {
+                        "toolName": ev.get("toolName"),
+                        "state": ev.get("state"),
+                        "toolArguments": ev.get("toolArguments"),
                     })
                     continue
-            # tool calls
-            if role == "tool-invocation":
-                yield ("tool", {
-                    "toolName": ev.get("toolName"),
-                    "state": ev.get("state"),
-                    "toolArguments": ev.get("toolArguments"),
-                })
-                continue
+        finally:
+            r.close()
 
     def stream(self, prompt: str, model: str = "gpt-6-luna", retries: int = 4,
                history: list | None = None, images: list[dict] | None = None,
