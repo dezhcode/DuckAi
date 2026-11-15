@@ -49,13 +49,16 @@ class FakeAPI:
 class EventClient(DuckAI):
     def __init__(self):
         super().__init__()
-        self.ask = Mock(return_value='یک تصویر قرمز است.')
+        self.text_stream = Mock(return_value=[('message', 'یک تصویر قرمز است.')])
         self.image_requests = []
 
     def stream_events(self, prompt, **kwargs):
-        self.image_requests.append((prompt, kwargs))
-        yield ('message', 'تصویر آماده شد.')
-        yield ('image', {'b64': base64.b64encode(image_bytes()).decode(), 'format': 'jpeg'})
+        if kwargs.get('draw'):
+            self.image_requests.append((prompt, kwargs))
+            yield ('message', 'تصویر آماده شد.')
+            yield ('image', {'b64': base64.b64encode(image_bytes()).decode(), 'format': 'jpeg'})
+        else:
+            yield from self.text_stream(prompt, **kwargs)
 
 
 class BotFlowTests(unittest.TestCase):
@@ -72,7 +75,7 @@ class BotFlowTests(unittest.TestCase):
         small = {'file_id': 'small', 'width': 10, 'height': 10}
         large = {'file_id': 'large', 'width': 100, 'height': 100}
         self.run_message(photo=[large, small], caption='چه می‌بینی؟')
-        args, kwargs = self.client.ask.call_args
+        args, kwargs = self.client.text_stream.call_args
         self.assertEqual(args[0], 'چه می‌بینی؟')
         self.assertEqual(self.api.downloads, [large])
         part = kwargs['images'][0]
@@ -83,12 +86,12 @@ class BotFlowTests(unittest.TestCase):
 
     def test_photo_without_caption_gets_default_question(self):
         self.run_message(photo=[{'file_id': 'photo', 'width': 1, 'height': 1}])
-        self.assertIn('تصویر', self.client.ask.call_args.args[0])
+        self.assertIn('تصویر', self.client.text_stream.call_args.args[0])
 
     def test_reply_to_photo_uses_the_new_question(self):
         self.run_message(text='رنگ آن چیست؟', reply_to_message={'photo': [{'file_id': 'reply'}]})
         self.assertEqual(self.api.downloads[0]['file_id'], 'reply')
-        self.assertEqual(self.client.ask.call_args.args[0], 'رنگ آن چیست؟')
+        self.assertEqual(self.client.text_stream.call_args.args[0], 'رنگ آن چیست؟')
 
     def test_image_document_is_supported(self):
         self.run_message(document={'file_id': 'document', 'mime_type': 'image/png'}, caption='شرح بده')
@@ -96,7 +99,7 @@ class BotFlowTests(unittest.TestCase):
 
     def test_text_chat_still_works(self):
         self.run_message(text='سلام')
-        self.assertIsNone(self.client.ask.call_args.kwargs['images'])
+        self.assertIsNone(self.client.text_stream.call_args.kwargs['images'])
 
     def test_image_generation_uses_repo_parser_and_uploads_a_jpeg(self):
         self.run_message(text='/draw یک گربه فضانورد')
@@ -115,11 +118,63 @@ class BotFlowTests(unittest.TestCase):
         self.assertFalse(self.client.image_requests)
         self.assertIn('/draw', self.api.sent[0][1])
 
+    def test_flying_car_request_generates_image_without_command(self):
+        self.run_message(text='یک ماشین پرنده طراحی کن')
+        self.assertEqual(self.client.image_requests[0][0], 'یک ماشین پرنده طراحی کن')
+        self.assertEqual(len(self.api.photos), 1)
+        self.assertIn('ماشین پرنده', self.bot.session(self.message)['history'][0]['content'][0]['text'])
+
+    def test_polite_and_english_image_requests_do_not_need_commands(self):
+        for prompt in ('یک ماشین پرنده طراحی کن لطفاً', 'طراحی کن یک ماشین پرنده',
+                       'می\u200cخوام یک عکس از جنگل بسازی', 'یه گربه برام بکش',
+                       'Create an image of a flying car', 'Please draw a cat'):
+            with self.subTest(prompt=prompt):
+                api = FakeAPI()
+                bot = telegram.Bot(api, lambda: EventClient())
+                bot.handle_update({'message': dict(self.message, text=prompt)})
+                self.assertEqual(len(api.photos), 1)
+
+    def test_image_questions_negations_and_code_stay_in_text_chat(self):
+        for prompt in ('چطور یک ماشین پرنده طراحی کنم؟', 'طراحی ماشین پرنده را توضیح بده',
+                       'نمی\u200cخوام عکس بسازی', 'عکس نساز', 'کد یک برنامه طراحی کن',
+                       'یک برنامه ورزشی طراحی کن', 'برام سایت طراحی کن',
+                       'How do I draw a cat?', "Don't draw a cat", 'Translate: draw a cat'):
+            with self.subTest(prompt=prompt):
+                api = FakeAPI()
+                client = EventClient()
+                bot = telegram.Bot(api, lambda: client)
+                bot.handle_update({'message': dict(self.message, text=prompt)})
+                self.assertEqual(len(api.photos), 0)
+                self.assertEqual(len(client.image_requests), 0)
+                client.text_stream.assert_called_once()
+
+    def test_provider_selected_image_tool_is_delivered_from_ordinary_chat(self):
+        self.client.text_stream.return_value = [
+            ('tool', {'toolName': 'GenerateImage'}),
+            ('image_partial', {'status': 'partial'}),
+            ('image', {'b64': base64.b64encode(image_bytes()).decode(), 'format': 'jpeg'}),
+        ]
+        self.run_message(text='یک منظره رؤیایی برایم مجسم می‌کنی؟')
+        self.assertEqual(len(self.api.photos), 1)
+        self.assertFalse(self.client.text_stream.call_args.kwargs['draw'])
+        self.assertFalse(self.api.sent, 'an image-only response must not send empty-answer text')
+
+    def test_photo_description_is_not_routed_to_image_generation(self):
+        self.run_message(photo=[{'file_id': 'photo'}], caption='این عکس را توصیف کن')
+        self.assertEqual(len(self.api.photos), 0)
+        self.assertTrue(self.client.text_stream.call_args.kwargs['images'])
+
+    def test_incomplete_generated_image_is_reported_as_failure(self):
+        self.client.text_stream.return_value = [('image_title', 'Generating')]
+        self.run_message(text='یک منظره رؤیایی برایم مجسم می‌کنی؟')
+        self.assertFalse(self.api.photos)
+        self.assertIn('ناموفق', self.api.sent[-1][1])
+
     def test_unsupported_vision_model_falls_back_without_changing_selection(self):
         session = self.bot.session(self.message)
         session['model'] = telegram.MODELS['oss']
         self.run_message(photo=[{'file_id': 'photo'}])
-        self.assertEqual(self.client.ask.call_args.kwargs['model'], telegram.DEFAULT_MODEL)
+        self.assertEqual(self.client.text_stream.call_args.kwargs['model'], telegram.DEFAULT_MODEL)
         self.assertEqual(session['model'], telegram.MODELS['oss'])
 
     def test_duplicate_updates_do_not_generate_duplicate_images(self):
@@ -136,12 +191,12 @@ class BotFlowTests(unittest.TestCase):
         self.assertEqual(session['history'], [])
 
     def test_errors_never_echo_credentials(self):
-        self.client.ask.side_effect = RuntimeError('sensitive-token')
+        self.client.text_stream.side_effect = RuntimeError('sensitive-token')
         self.run_message(text='hi')
         self.assertNotIn('sensitive-token', self.api.sent[-1][1])
 
     def test_upstream_rate_limits_have_a_useful_safe_message(self):
-        self.client.ask.side_effect = telegram.DuckAIError('private provider details', status=429)
+        self.client.text_stream.side_effect = telegram.DuckAIError('private provider details', status=429)
         self.run_message(text='hi')
         self.assertIn('محدود', self.api.sent[-1][1])
         self.assertNotIn('private provider details', self.api.sent[-1][1])

@@ -11,11 +11,14 @@ This adapter uses the same `DuckAI.ask`, `image_to_data_url`, and `DuckAI.genera
 | Photo without a caption | Describe the image in Persian |
 | A text reply to a photo | Analyze the replied-to photo using the new question |
 | An image sent as a document | Validate and convert the image, then analyze it |
+| `یک ماشین پرنده طراحی کن` or `Draw a flying car` | Generate and send an image directly from normal chat; no command is needed |
 | `/draw description` or `/image description` | Generate an image through DuckAI and upload a JPEG to Telegram |
 | `/models` or `/model` | Select a text model with inline buttons |
 | `/clear` or `/new` | Clear recent text context |
 
 When the selected text model is not configured for vision (GPT OSS), photo analysis uses the default Luna model and tells the user. Image generation always uses that default model. Photos and generated files live only in a temporary directory and are deleted after the request; binary image data is not retained in conversation history.
+
+Ordinary chat consumes all repository `stream_events` results, including provider-selected image-generation tools and completed images. It does not use the text-only `ask()` wrapper, which drops image events. Clear creation requests in Persian and English take a direct generation path; explanations, negations and code questions stay in ordinary chat, where the provider can still choose tools. Captioned/replied-to photos use the vision path without requiring a slash command. `/draw` remains an optional shortcut.
 
 ## Vercel deployment
 

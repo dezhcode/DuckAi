@@ -1,9 +1,11 @@
 """Telegram adapter for the repository's DuckAI text, vision and image APIs."""
+import base64
 import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import tempfile
 import threading
 import time
@@ -20,7 +22,7 @@ VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
 MAX_FILE_BYTES = 15 * 1024 * 1024
 HELP = ('سلام! متن بفرست تا گفتگو کنیم.\n'
         '📷 عکس را با سؤال در کپشن بفرست؛ یا روی عکس ریپلای کن و سؤالت را بنویس.\n'
-        '🎨 ساخت تصویر: /draw یک گربه فضانورد روی ماه\n'
+        '🎨 برای ساخت تصویر کافی است بنویسی: یک ماشین پرنده طراحی کن\n'
         '/models انتخاب مدل\n/clear پاک‌کردن گفتگوی فعلی')
 
 
@@ -134,6 +136,26 @@ def attachment_from(message):
     return None
 
 
+def is_image_request(text):
+    """Fast path for clear creation requests; the model still chooses tools for other chat."""
+    text = re.sub(r'\s+', ' ', text.translate(str.maketrans({'ي': 'ی', 'ك': 'ک', '\u200c': ' '}))).strip().lower()
+    # Questions about making images, negations, translation and code requests stay in chat.
+    if re.search(r'(?:چطور|چگونه|آموزش|ترجمه|توضیح بده|توضیح بدی|نساز|نکش|نکن|نمی\s*(?:خواهم|خوام)|کد|برنامه نویسی|الگوریتم)', text):
+        return False
+    if re.search(r"\b(?:how|explain|translate|do not|don't|code|algorithm)\b", text):
+        return False
+    if (re.search(r'(?:برنامه|سایت|اپلیکیشن|رژیم|بودجه|استراتژی|نقشه راه)', text)
+            and not re.search(r'(?:عکس|تصویر|نقاشی|پوستر|لوگو|آواتار|والپیپر)', text)):
+        return False
+    if re.search(r'(?:طراحی|نقاشی)\s+(?:کن|کنی|بکن|بکنی)(?=\s|[.!؟?]|$)|(?:^|\s)(?:بکش|بکشی)(?=\s|[.!؟?]|$)', text):
+        return True
+    visual = r'(?:عکس|تصویر|نقاشی|پوستر|لوگو|آواتار|والپیپر)'
+    create = r'(?:بساز|بکش|تولید کن|خلق کن|طراحی کن|بسازی|بکشی|درست کن|درست کنی)'
+    if re.search(visual, text) and re.search(create, text):
+        return True
+    return bool(re.search(r'\b(?:draw|paint|illustrate)\b|\b(?:create|generate|make|design)\b.*\b(?:image|picture|photo|poster|logo|illustration|wallpaper)\b', text))
+
+
 def keyboard():
     return {'inline_keyboard': [[{'text': model, 'callback_data': 'model:' + model}] for model in MODEL_IDS]}
 
@@ -223,28 +245,14 @@ class Bot:
         if not attachment and text and not draw:
             attachment = attachment_from(message.get('reply_to_message') or {})
         if not text and not attachment:
-            self.api.send(chat_id, 'متن یا عکس بفرست. ساخت تصویر: /draw توضیح تصویر', reply_to)
+            self.api.send(chat_id, 'متن یا عکس بفرست؛ برای ساخت تصویر مثلاً بنویس: یک ماشین پرنده طراحی کن.', reply_to)
             return
+        # A photo/question remains a vision request; normal text can select image tools.
+        draw = draw or (attachment is None and is_image_request(text))
+        prompt = argument.strip() if command in ('/draw', '/image') else text
+        prompt = prompt or 'این تصویر را به فارسی توضیح بده.'
         client = self.client_factory()
         try:
-            if draw:
-                self.api.action(chat_id, 'upload_photo')
-                # Use the repository's GenerateImage event parser and writable temp storage.
-                with tempfile.TemporaryDirectory(prefix='duckai-image-') as directory:
-                    path, companion, _ = client.generate_image(argument.strip(), model=DEFAULT_MODEL,
-                                                               out_dir=directory, retries=2)
-                    from PIL import Image
-                    with Image.open(path) as generated:
-                        generated.load()
-                        generated = generated.convert('RGB')
-                        generated.thumbnail((2048, 2048))
-                        upload = str(Path(directory) / 'duckai-generated.jpg')
-                        generated.save(upload, 'JPEG', quality=90)
-                    self.api.photo(chat_id, upload, reply_to)
-                    if companion.strip():
-                        self.api.send(chat_id, companion, reply_to)
-                log.info('image_generation_completed')
-                return
             self.api.action(chat_id, 'typing')
             images = None
             model = session['model']
@@ -263,14 +271,35 @@ class Bot:
                 if model not in VISION_MODELS:
                     model = DEFAULT_MODEL
                     self.api.send(chat_id, 'برای تحلیل عکس از مدل ' + model + ' استفاده می‌کنم.', reply_to)
-            prompt = text or 'این تصویر را به فارسی توضیح بده.'
             history = session['history'] if model == session['model'] else []
-            answer = client.ask(prompt, model=model, history=history, images=images, retries=1)
-            self.api.send(chat_id, answer, reply_to)
-            # Retain bounded text context; uploaded image bytes are not cached in process memory.
+            text_parts = []
+            generated = None
+            image_started = False
+            # ask()/stream() intentionally discard non-text events. Chat must consume all
+            # repository events so the provider can generate images without a slash command.
+            for kind, value in client.stream_events(prompt, model=DEFAULT_MODEL if draw else model,
+                                                   history=history, images=images, draw=draw,
+                                                   retries=2 if draw else 1):
+                if kind == 'message':
+                    text_parts.append(value)
+                elif kind == 'image':
+                    generated = value
+                if (kind in ('image', 'image_title', 'image_partial') or
+                        (kind == 'tool' and value.get('toolName') == 'GenerateImage')):
+                    if not image_started:
+                        self.api.action(chat_id, 'upload_photo')
+                        image_started = True
+            if generated:
+                self.upload_generated(chat_id, generated, reply_to)
+            elif draw or image_started:
+                raise DuckAIError('No completed image received')
+            answer = ''.join(text_parts)
+            if answer.strip() or not generated:
+                self.api.send(chat_id, answer, reply_to)
+            # Keep bounded text context, including image-request descriptions for follow-ups.
             session['history'] = (history + [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}]},
-                                            {'role': 'assistant', 'content': answer}])[-12:]
-            log.info('vision_completed' if attachment else 'text_completed')
+                                            {'role': 'assistant', 'content': answer or 'تصویر ساخته شد.'}])[-12:]
+            log.info('image_generation_completed' if generated else 'vision_completed' if attachment else 'text_completed')
         except UserInputError as error:
             self.api.send(chat_id, str(error), reply_to)
         except Exception as error:
@@ -282,3 +311,18 @@ class Bot:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
             client.s.close()
+
+    def upload_generated(self, chat_id, generated, reply_to):
+        from PIL import Image
+        with tempfile.TemporaryDirectory(prefix='duckai-image-') as directory:
+            path = Path(directory) / 'generated-image'
+            path.write_bytes(base64.b64decode(generated['b64'], validate=True))
+            with Image.open(path) as image:
+                if image.width * image.height > 25_000_000:
+                    raise DuckAIError('Generated image dimensions exceed limit')
+                image.load()
+                image = image.convert('RGB')
+                image.thumbnail((2048, 2048))
+                upload = str(Path(directory) / 'duckai-generated.jpg')
+                image.save(upload, 'JPEG', quality=90)
+            self.api.photo(chat_id, upload, reply_to)
