@@ -8,7 +8,7 @@ const DEFAULT_UA = ('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 
 async function solveChallenge(src, UA = DEFAULT_UA) {
   const dom = new JSDOM(
-    '<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src \\'none\\'; script-src \\'unsafe-inline\\';"></head><body><iframe id="jsa" sandbox="allow-scripts allow-same-origin"></iframe></body></html>', {
+    `<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline';"></head><body><iframe id="jsa" sandbox="allow-scripts allow-same-origin"></iframe></body></html>`, {
     url: 'https://duck.ai/',
     userAgent: UA,
     runScripts: 'outside-only',
@@ -19,7 +19,7 @@ async function solveChallenge(src, UA = DEFAULT_UA) {
   w.__DDG_FE_CHAT_HASH__ = '1';
   const iframe = w.document.querySelector('#jsa');
   if (iframe && iframe.contentDocument && iframe.contentDocument.head) {
-    iframe.contentDocument.head.innerHTML = '<meta http-equiv="Content-Security-Policy" content="default-src \\'none\\'; script-src \\'unsafe-inline\\';">';
+    iframe.contentDocument.head.innerHTML = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline';">`;
   }
 
   // jsdom keeps its own UA/flag values; force what a plain Chrome reports.
