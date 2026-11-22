@@ -24,12 +24,12 @@ from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
 
 def clean_chat_reply(text):
-    """Strip provider citation markup without altering substantive reply text."""
-    text = re.sub(r'<citation\\b[^>]*>\\s*</citation\\s*>', '', text, flags=re.I)
-    text = re.sub(r'<citation\\b[^>]*/\\s*>', '', text, flags=re.I)
-    text = re.sub(r'\\s*\\[(?:\\d+)(?:\\s*[,،-]\\s*\\d+)*\\]', '', text)
-    text = re.sub(r'[ \\t]+(?=\\n)', '', text)
-    return re.sub(r'\\n{3,}', '\\n\\n', text).strip()
+    """Remove provider citation markup while keeping the model's answer."""
+    text = re.sub(r'<citation\b[^>]*>\s*</citation\s*>', '', text, flags=re.I)
+    text = re.sub(r'<citation\b[^>]*/\s*>', '', text, flags=re.I)
+    text = re.sub(r'\s*\[(?:\d+)(?:\s*[,،-]\s*\d+)*\]', '', text)
+    text = re.sub(r'[ \t]+(?=\n)', '', text)
+    return re.sub(r'\n{3,}', '\n\n', text).strip()
 
 
 log = logging.getLogger(__name__)
