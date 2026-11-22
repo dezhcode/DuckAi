@@ -2,6 +2,7 @@
 import ast
 import operator
 import re
+import requests
 from dataclasses import dataclass, field
 
 from trump_persona import news_query
@@ -76,7 +77,7 @@ class TrumpAgent:
             if encyclopedia:
                 blocks.append(encyclopedia)
                 result.tool_names.append('encyclopedia_search')
-        except (ValueError, KeyError, __import__('requests').RequestException):
+        except (ValueError, KeyError, requests.RequestException):
             pass
         result.context = '\n\n'.join(blocks)
         return result
