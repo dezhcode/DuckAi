@@ -555,6 +555,10 @@ class DuckAI:
                         "toolName": ev.get("toolName"),
                         "state": ev.get("state"),
                         "toolArguments": ev.get("toolArguments"),
+                        "toolResult": ev.get("toolResult"),
+                        "result": ev.get("result"),
+                        "output": ev.get("output"),
+                        "sources": ev.get("sources"),
                     })
                     continue
         finally:
