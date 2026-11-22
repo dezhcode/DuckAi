@@ -40,6 +40,7 @@
 
 import argparse
 import base64
+import logging
 import hashlib
 import io
 import json
@@ -482,7 +483,7 @@ class DuckAI:
                           draw=draw, prompt_extra=prompt_extra)
             response_challenge = self.queue_response_challenge(r)
             if r.status_code == 200:
-                log.info('duckai_chat_accepted model=%s history_messages=%d session_cookie_count=%d frontend_version_present=%s status_challenge_present=%s has_images=%s draw=%s',
+                logging.getLogger(__name__).info('duckai_chat_accepted model=%s history_messages=%d session_cookie_count=%d frontend_version_present=%s status_challenge_present=%s has_images=%s draw=%s',
                          model, len(history or []), len(self.s.cookies),
                          bool(self.fe_version), bool(self.jsa), bool(images), bool(draw))
                 break
