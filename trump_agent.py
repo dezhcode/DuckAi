@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 
 from trump_persona import news_query
 from news_reader import context as news_context
+from agent_web import search_encyclopedia
 
 OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
        ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
@@ -70,5 +71,12 @@ class TrumpAgent:
                 result.tool_names.append('calculator')
             except (ValueError, SyntaxError, ZeroDivisionError, OverflowError):
                 pass
+        try:
+            encyclopedia = search_encyclopedia(prompt)
+            if encyclopedia:
+                blocks.append(encyclopedia)
+                result.tool_names.append('encyclopedia_search')
+        except (ValueError, KeyError, __import__('requests').RequestException):
+            pass
         result.context = '\n\n'.join(blocks)
         return result
