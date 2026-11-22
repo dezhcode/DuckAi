@@ -312,7 +312,7 @@ class Bot:
             return
         if command == '/status':
             self.api.send(chat_id, 'Trump Agent\\nمدل: ' + session['model'] +
-                          '\\nابزارها: اخبار، محاسبات، تصویر و فایل متنی' +
+                          '\\nابزارها: اخبار، محاسبات، تصویر، فایل، ویکی‌پدیا و جستجوی وب' +
                           '\\nحافظه: ' + ('پایدار' if self.store.enabled else 'موقت'), reply_to)
             return
         if command in ('/models', '/model'):
@@ -369,7 +369,7 @@ class Bot:
             sources = agent_result.sources if agent_result else []
             if agent_result and agent_result.news_topic:
                 session['news_topic'] = agent_result.news_topic
-                if not sources and not attachment:
+                if not sources and not attachment and 'web_search' not in agent_result.tool_names and 'encyclopedia_search' not in agent_result.tool_names:
                     self.send_answer(chat_id, 'برای این موضوع، خبر تازه و مرتبطی در منابع در دسترس تأیید نکردم. بدون منبع درباره جزئیاتش ادعایی نمی‌کنم.', reply_to, session)
                     return
             if agent_result and agent_result.tool_names:
