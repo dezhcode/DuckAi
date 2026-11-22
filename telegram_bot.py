@@ -487,7 +487,7 @@ class Bot:
         # version that received it; otherwise start a clean session.
         # Never retry after partial output or a provider-specified wait.
         previous = None
-        for attempt in range(3):
+        for attempt in range(2):
             client = self.client_factory()
             emitted = False
             try:
@@ -503,7 +503,7 @@ class Bot:
                 return
             except DuckAIError as error:
                 retryable = (
-                    attempt < 2 and not emitted and error.status == 418
+                    attempt == 0 and not emitted and error.status == 418
                     and error.stage == 'chat'
                     and error.provider_code == 'ERR_CHALLENGE'
                     and error.retry_after is None
