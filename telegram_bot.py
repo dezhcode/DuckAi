@@ -186,6 +186,42 @@ def keyboard():
     return {'inline_keyboard': [[{'text': model, 'callback_data': 'model:' + model}] for model in MODEL_IDS]}
 
 
+class SharedCooldown:
+    """Cross-instance provider cooldown via Upstash REST; local fallback on failure."""
+    KEY = 'duckai:provider:cooldown'
+
+    def __init__(self):
+        self.url = os.environ.get('KV_REST_API_URL', '').rstrip('/')
+        self.token = os.environ.get('KV_REST_API_TOKEN', '')
+        self.enabled = bool(self.url and self.token)
+
+    def command(self, *args):
+        if not self.enabled:
+            return None
+        try:
+            with requests.post(self.url, json=list(args),
+                               headers={'Authorization': 'Bearer ' + self.token},
+                               timeout=(2, 3)) as response:
+                response.raise_for_status()
+                data = response.json()
+            if data.get('error'):
+                raise ValueError('Redis command rejected')
+            return data.get('result')
+        except (requests.RequestException, ValueError, TypeError):
+            log.warning('shared_cooldown_unavailable')
+            return None
+
+    def remaining(self):
+        value = self.command('TTL', self.KEY)
+        return max(0, int(value)) if isinstance(value, int) else 0
+
+    def set(self, seconds):
+        # Extend an existing cooldown, never shorten it.
+        seconds = max(1, min(300, int(seconds)))
+        current = self.remaining()
+        self.command('SET', self.KEY, '429', 'EX', max(seconds, current))
+
+
 class Bot:
     def __init__(self, api, client_factory=None, news_reader=None):
         self.api = api
@@ -197,6 +233,7 @@ class Bot:
         self.updates = {}
         self.lock = threading.Lock()
         self.ai_gate = threading.BoundedSemaphore(4)
+        self.shared_cooldown = SharedCooldown()
         self.ai_not_before = 0
         self.limit_status = None
         self.limit_code = None
@@ -291,7 +328,7 @@ class Bot:
         retry_after = None
         for index in range(10):
             with self.lock:
-                remaining = max(0, math.ceil(self.ai_not_before - time.monotonic()))
+                remaining = max(0, max(math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining()), self.shared_cooldown.remaining())
             if remaining:
                 stop_reason = 'cooldown_active'
                 log.info('simulation_skipped reason=cooldown_active remaining_s=%d', remaining)
@@ -317,6 +354,7 @@ class Bot:
                             self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
                             self.limit_status = 429
                             self.limit_code = error.provider_code
+                        self.shared_cooldown.set(seconds)
                         log.warning('provider_cooldown_set source=simulation status=429 duration_s=%d retry_after=%s',
                                     seconds, retry_after)
                     elif error.status == 418 and error.provider_code == 'ERR_CHALLENGE':
@@ -438,7 +476,7 @@ class Bot:
             session['introduced'] = True
             return
         with self.lock:
-            remaining = math.ceil(self.ai_not_before - time.monotonic())
+            remaining = max(math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining())
         if remaining > 0:
             self.api.send(chat_id, self.limit_message(remaining), reply_to)
             return
@@ -449,7 +487,7 @@ class Bot:
         try:
             # Another request may have entered cooldown while this one acquired the gate.
             with self.lock:
-                remaining = math.ceil(self.ai_not_before - time.monotonic())
+                remaining = max(math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining())
             if remaining > 0:
                 self.api.send(chat_id, self.limit_message(remaining), reply_to)
                 return
@@ -566,6 +604,7 @@ class Bot:
                         self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
                         self.limit_status = error.status
                         self.limit_code = getattr(error, 'provider_code', None)
+                    self.shared_cooldown.set(seconds)
                     self.api.send(chat_id, self.limit_message(seconds), reply_to)
                 else:
                     self.api.send(chat_id, 'Duck.ai این درخواست را نپذیرفت. لطفاً دوباره تلاش کن.', reply_to)
