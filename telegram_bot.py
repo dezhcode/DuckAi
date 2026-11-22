@@ -290,6 +290,12 @@ class Bot:
         stop_reason = None
         retry_after = None
         for index in range(10):
+            with self.lock:
+                remaining = max(0, math.ceil(self.ai_not_before - time.monotonic()))
+            if remaining:
+                stop_reason = 'cooldown_active'
+                log.info('simulation_skipped reason=cooldown_active remaining_s=%d', remaining)
+                break
             started = time.monotonic()
             status = 'ok'
             retry_after = None
@@ -306,6 +312,13 @@ class Bot:
                     retry_after = error.retry_after
                     if error.status == 429:
                         stop_reason = 'rate_limit_429'
+                        seconds = max(1, min(300, retry_after if retry_after is not None else 30))
+                        with self.lock:
+                            self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
+                            self.limit_status = 429
+                            self.limit_code = error.provider_code
+                        log.warning('provider_cooldown_set source=simulation status=429 duration_s=%d retry_after=%s',
+                                    seconds, retry_after)
                     elif error.status == 418 and error.provider_code == 'ERR_CHALLENGE':
                         consecutive_challenges += 1
                         if consecutive_challenges >= 3:
