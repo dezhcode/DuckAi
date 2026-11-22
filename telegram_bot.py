@@ -22,6 +22,15 @@ from trump_agent import TrumpAgent
 from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
 
+def clean_chat_reply(text):
+    """Strip provider citation markup without altering substantive reply text."""
+    text = re.sub(r'<citation\\b[^>]*>\\s*</citation\\s*>', '', text, flags=re.I)
+    text = re.sub(r'<citation\\b[^>]*/\\s*>', '', text, flags=re.I)
+    text = re.sub(r'\\s*\\[(?:\\d+)(?:\\s*[,،-]\\s*\\d+)*\\]', '', text)
+    text = re.sub(r'[ \\t]+(?=\\n)', '', text)
+    return re.sub(r'\\n{3,}', '\\n\\n', text).strip()
+
+
 log = logging.getLogger(__name__)
 DEFAULT_MODEL = MODELS['luna']
 MODEL_IDS = list(dict.fromkeys(MODELS[k] for k in ('luna', 'mini', 'haiku', 'mistral', 'oss', 'gemma')))
@@ -428,6 +437,7 @@ class Bot:
                 answer = finish_answer(answer, sources)
             elif answer.strip() and unsupported_personal_claim(answer):
                 answer = 'این شخصیت شبیه‌سازی‌شده است؛ اقدام واقعی را به خودم نسبت نمی‌دهم. برای بررسی چنین ادعایی، منبع معتبر لازم است.'
+            answer = clean_chat_reply(answer)
             if answer.strip() or not generated:
                 self.send_answer(chat_id, answer, reply_to, session)
             # Keep bounded text context, including image-request descriptions for follow-ups.
