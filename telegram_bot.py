@@ -16,12 +16,12 @@ from contextlib import closing
 import requests
 
 from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
-from trump_persona import INTRO, IDENTITY, identity_question, news_query, request_history, unsupported_personal_claim
+from trump_persona import INTRO, IDENTITY, identity_question, request_history, unsupported_personal_claim
 from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
 
 log = logging.getLogger(__name__)
-DEFAULT_MODEL = MODELS['haiku']
+DEFAULT_MODEL = MODELS['luna']
 MODEL_IDS = list(dict.fromkeys(MODELS[k] for k in ('luna', 'mini', 'haiku', 'mistral', 'oss', 'gemma')))
 VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
 MAX_FILE_BYTES = 15 * 1024 * 1024
