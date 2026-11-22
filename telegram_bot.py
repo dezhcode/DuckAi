@@ -370,9 +370,6 @@ class Bot:
             sources = agent_result.sources if agent_result else []
             if agent_result and agent_result.news_topic:
                 session['news_topic'] = agent_result.news_topic
-                if False:  # Duck.ai native search may supply evidence after streaming
-                    self.send_answer(chat_id, 'برای این موضوع، خبر تازه و مرتبطی در منابع در دسترس تأیید نکردم. بدون منبع درباره جزئیاتش ادعایی نمی‌کنم.', reply_to, session)
-                    return
             if agent_result and agent_result.tool_names:
                 log.info('agent_tools_executed tools=%s', ','.join(agent_result.tool_names))
             images = None
