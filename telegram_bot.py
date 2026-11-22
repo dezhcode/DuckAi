@@ -30,7 +30,7 @@ HELP = (IDENTITY + '\nسلام. درباره چه موضوعی صحبت کنیم
         '📷 عکس را با سؤال در کپشن بفرست؛ یا روی عکس ریپلای کن و سؤالت را بنویس.\n'
         '🎨 برای ساخت تصویر کافی است بنویسی: یک ماشین پرنده طراحی کن\n'
         '📄 فایل متنی یا کد بفرست تا بررسی کنم.\n'
-        '/models انتخاب مدل\n/clear پاک‌کردن گفتگوی فعلی')
+        '/models انتخاب مدل\n/clear پاک‌کردن گفتگوی فعلی\n/export دریافت فایل گفتگو\n/status وضعیت ربات')
 
 
 def webhook_secret(token):
@@ -124,6 +124,13 @@ class TelegramAPI:
                 if len(data) > MAX_FILE_BYTES:
                     raise UserInputError('حجم عکس باید کمتر از ۱۵ مگابایت باشد.')
         return bytes(data)
+
+    def document(self, chat_id, path, reply_to=None):
+        payload = {'chat_id': chat_id}
+        if reply_to:
+            payload['reply_parameters'] = json.dumps({'message_id': reply_to, 'allow_sending_without_reply': True})
+        with open(path, 'rb') as file:
+            self.call('sendDocument', payload, files={'document': (Path(path).name, file, 'text/plain')})
 
     def photo(self, chat_id, path, reply_to=None):
         payload = {'chat_id': chat_id}
@@ -265,6 +272,22 @@ class Bot:
             session['history'] = []
             session['news_topic'] = None
             self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
+            return
+        if command == '/export':
+            turns = session.get('history', [])[-12:]
+            if not turns:
+                self.api.send(chat_id, 'هنوز گفتگویی برای خروجی گرفتن وجود ندارد.', reply_to)
+                return
+            lines = []
+            for turn in turns:
+                content = turn.get('content', '')
+                if isinstance(content, list):
+                    content = ' '.join(part.get('text', '') for part in content if isinstance(part, dict))
+                lines.append(('User' if turn.get('role') == 'user' else 'Assistant') + ': ' + str(content))
+            with tempfile.TemporaryDirectory(prefix='trump-export-') as directory:
+                path = Path(directory) / 'conversation.txt'
+                path.write_text('\\n\\n'.join(lines)[:60_000], encoding='utf-8')
+                self.api.document(chat_id, str(path), reply_to)
             return
         if command == '/status':
             self.api.send(chat_id, 'Trump Agent\\nمدل: ' + session['model'] +
