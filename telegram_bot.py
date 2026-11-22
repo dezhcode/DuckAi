@@ -216,10 +216,24 @@ class SharedCooldown:
         return max(0, int(value)) if isinstance(value, int) else 0
 
     def set(self, seconds):
-        # Extend an existing cooldown, never shorten it.
+        # Atomic max-TTL update prevents competing instances from shortening cooldown.
         seconds = max(1, min(300, int(seconds)))
-        current = self.remaining()
-        self.command('SET', self.KEY, '429', 'EX', max(seconds, current))
+        script = ("local ttl=redis.call('TTL',KEYS[1]); "
+                  "if ttl < tonumber(ARGV[1]) then "
+                  "redis.call('SET',KEYS[1],'429','EX',ARGV[1]); "
+                  "end; return redis.call('TTL',KEYS[1])")
+        value = self.command('EVAL', script, '1', self.KEY, str(seconds))
+        log.info('shared_cooldown_written success=%s ttl_s=%s',
+                 isinstance(value, int) and value > 0, value if isinstance(value, int) else None)
+
+    def claim_update(self, update_id):
+        """Atomically deduplicate Telegram retries across warm instances."""
+        if not self.enabled or update_id is None:
+            return True
+        result = self.command('SET', 'duckai:telegram:update:' + str(update_id),
+                              '1', 'EX', '600', 'NX')
+        # Fail open on Redis errors to avoid silently dropping user messages.
+        return result == 'OK' if result is not None else True
 
 
 class Bot:
@@ -279,6 +293,9 @@ class Bot:
                 return
             if update_id is not None:
                 self.updates[update_id] = now
+        if not self.shared_cooldown.claim_update(update_id):
+            log.info('telegram_duplicate_update_skipped')
+            return
         message = update.get('message')
         callback = update.get('callback_query')
         if callback:
