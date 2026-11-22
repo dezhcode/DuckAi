@@ -460,6 +460,8 @@ class Bot:
                         location.lineno if location else 0,
                         getattr(error, 'status', None), getattr(error, 'stage', None),
                         getattr(error, 'provider_code', None), getattr(error, 'retry_after', None))
+            if getattr(error, 'challenge_diagnostics', None) is not None:
+                log.info('duckai_rejection_diagnostics %s', error.challenge_diagnostics)
             if (getattr(error, 'status', None) == 418
                     and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
                     and getattr(error, 'retry_after', None) is None):
@@ -510,8 +512,9 @@ class Bot:
                 )
                 if not retryable:
                     raise
-                log.info('challenge_rejected attempt=%d response_challenge=%s',
-                         attempt + 1, bool(client._pending_response_challenge))
+                log.info('challenge_rejected attempt=%d response_challenge=%s diagnostics=%s',
+                         attempt + 1, bool(client._pending_response_challenge),
+                         getattr(error, 'challenge_diagnostics', None))
                 previous = client
             finally:
                 client.s.close()
