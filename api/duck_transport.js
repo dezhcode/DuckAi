@@ -34,6 +34,7 @@ async function handshake() {
     const headers = { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' };
     const boot = await fetch(BASE + '/', { headers, signal: AbortSignal.timeout(15000) });
     if (!boot.ok) throw Error('Bootstrap HTTP ' + boot.status);
+    console.info('transport_bootstrap', JSON.stringify({status:boot.status, cookiesBefore:state.cookies.size}));
     cookies(boot.headers);
     const html = await boot.text();
     state.feVersion = (html.match(/data-version-tag="([^"]*)"/)?.[1] || 'dev') + '-' +
@@ -45,8 +46,10 @@ async function handshake() {
       signal: AbortSignal.timeout(15000) });
     cookies(status.headers);
     const raw = status.headers.get('x-vqd-hash-1');
+    console.info('transport_status', JSON.stringify({status:status.status, challengePresent:!!raw, cookies:state.cookies.size, feVersionPresent:!!state.feVersion}));
     if (!raw) throw Error('Challenge HTTP ' + status.status);
     state.jsa = await solve(raw);
+    console.info('transport_handshake_complete', JSON.stringify({proofPresent:!!state.jsa, cookies:state.cookies.size}));
   })();
   try { await inFlightHandshake; } finally { inFlightHandshake = null; }
 }
@@ -88,6 +91,7 @@ async function chat(body) {
     cookies(response.headers);
     const next = response.headers.get('x-vqd-hash-1');
     if (next) { try { state.jsa = await solve(next); } catch { state.jsa = ''; } }
+    console.info('transport_chat_status', JSON.stringify({attempt:attempt+1, status:response.status, responseChallenge:!!next, proofPresent:!!state.jsa, cookies:state.cookies.size, historyCount:Array.isArray(body.history)?body.history.length:0}));
     if (response.status === 200 && response.body) {
       const events = [], reader = response.body.getReader(), decoder = new TextDecoder();
       let buffer = '';
@@ -104,7 +108,7 @@ async function chat(body) {
     lastStatus = response.status;
     await response.body?.cancel().catch(() => {});
     if (!next) state.jsa = '';
-    if (lastStatus === 429) break;
+    if (lastStatus === 429 || lastStatus === 401 || lastStatus === 403) break;
     if (attempt < 3) await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
   }
   return { ok: false, status: lastStatus, code: lastStatus === 418 ? 'ERR_CHALLENGE' : 'UPSTREAM_ERROR' };
@@ -121,7 +125,7 @@ module.exports = async (req, res) => {
     const result = await chat(req.body || {});
     return res.status(result.ok ? 200 : 502).json(result);
   } catch (err) {
-    console.error('duckai_transport_failure', err?.name || 'Error');
+    console.error('duckai_transport_failure', JSON.stringify({name:err?.name || 'Error', message:String(err?.message || '').replace(/https?:\\/\\/\\S+/g, '[url]').slice(0,140)}));
     return res.status(502).json({ ok: false, status: 502, code: 'TRANSPORT_ERROR' });
   }
 };
