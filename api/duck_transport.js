@@ -71,7 +71,7 @@ function parse(line) {
 }
 async function chat(body) {
   let lastStatus = 502;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt || !state.feVersion || !state.jsa) await handshake();
     const model = body.model || 'gpt-6-luna';
     const payload = { model,
@@ -108,8 +108,8 @@ async function chat(body) {
     lastStatus = response.status;
     await response.body?.cancel().catch(() => {});
     if (!next) state.jsa = '';
-    if (lastStatus === 429 || lastStatus === 401 || lastStatus === 403) break;
-    if (attempt < 3) await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
+    if ([418, 429, 401, 403].includes(lastStatus)) break;
+    if (attempt < 1) await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
   }
   return { ok: false, status: lastStatus, code: lastStatus === 418 ? 'ERR_CHALLENGE' : 'UPSTREAM_ERROR' };
 }
