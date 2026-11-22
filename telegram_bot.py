@@ -481,30 +481,27 @@ class Bot:
         session['introduced'] = True
 
     def response_events(self, prompt, **options):
-        # Two attempts total, on the same provider and normal authentication flow.
-        # Never retry a partial response, quota failure or provider-declared wait.
-        previous = None
-        for attempt in range(2):
+        # A rejected challenge is retried with a fresh HTTP session and proof.
+        # Keep retries bounded for serverless execution and respect provider waits.
+        for attempt in range(3):
             client = self.client_factory()
             emitted = False
             try:
-                if previous is not None:
-                    adopted = client.adopt_response_challenge(previous)
-                    log.info('challenge_retry_state source=%s', 'response_header' if adopted else 'new_handshake')
-                    previous = None
                 with closing(client.stream_events(prompt, retries=1, **options)) as events:
                     for event in events:
                         emitted = True
                         yield event
                 return
             except DuckAIError as error:
-                retryable = (attempt == 0 and not emitted and error.status == 418
-                             and error.stage == 'chat' and error.provider_code == 'ERR_CHALLENGE'
-                             and error.retry_after is None)
+                retryable = (
+                    attempt < 2 and not emitted and error.status == 418
+                    and error.stage == 'chat'
+                    and error.provider_code == 'ERR_CHALLENGE'
+                    and error.retry_after is None
+                )
                 if not retryable:
                     raise
-                previous = client
-                log.info('challenge_retry attempt=2 stage=chat')
+                log.info('challenge_retry attempt=%d source=fresh_session', attempt + 2)
             finally:
                 client.s.close()
 
