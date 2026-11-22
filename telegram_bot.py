@@ -16,10 +16,10 @@ from contextlib import closing
 import requests
 
 from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
-from trump_persona import INTRO, IDENTITY, identity_question, request_history, unsupported_personal_claim
+from trump_persona import IDENTITY, identity_question, request_history, unsupported_personal_claim
 from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
-from duck_search import is_web_search, sources_from_event, format_sources
+from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
 
 log = logging.getLogger(__name__)
@@ -424,8 +424,6 @@ class Bot:
             answer = ''.join(text_parts)
             if native_search_seen:
                 log.info('duckai_native_websearch_seen source_count=%d', len(native_urls))
-                if native_urls:
-                    answer += format_sources(native_urls)
             if answer.strip() and sources:
                 answer = finish_answer(answer, sources)
             elif answer.strip() and unsupported_personal_claim(answer):
@@ -461,8 +459,6 @@ class Bot:
             self.ai_gate.release()
 
     def send_answer(self, chat_id, answer, reply_to, session):
-        if not session['introduced']:
-            answer = INTRO + '\n\n' + answer
         self.api.send(chat_id, answer, reply_to)
         session['introduced'] = True
 
