@@ -17,7 +17,8 @@ import requests
 
 from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
 from trump_persona import INTRO, IDENTITY, identity_question, news_query, request_history, unsupported_personal_claim
-from news_reader import NewsReader, context as news_context, finish_answer
+from news_reader import NewsReader, finish_answer
+from trump_agent import TrumpAgent
 
 log = logging.getLogger(__name__)
 DEFAULT_MODEL = MODELS['haiku']
@@ -169,6 +170,7 @@ class Bot:
         self.api = api
         self.client_factory = client_factory or (lambda: RemoteDuckAI(api.token))
         self.news_reader = news_reader if news_reader is not None else NewsReader()
+        self.agent = TrumpAgent(self.news_reader)
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
@@ -289,14 +291,15 @@ class Bot:
                 self.api.send(chat_id, self.limit_message(remaining), reply_to)
                 return
             self.api.action(chat_id, 'typing')
-            sources = []
-            query = news_query(prompt, session['news_topic']) if not draw else None
-            if query:
-                session['news_topic'] = query[-700:]
-                sources = self.news_reader.search(query)
+            agent_result = self.agent.prepare(prompt, session['news_topic']) if not draw else None
+            sources = agent_result.sources if agent_result else []
+            if agent_result and agent_result.news_topic:
+                session['news_topic'] = agent_result.news_topic
                 if not sources and not attachment:
                     self.send_answer(chat_id, 'برای این موضوع، خبر تازه و مرتبطی در منابع در دسترس تأیید نکردم. بدون منبع درباره جزئیاتش ادعایی نمی‌کنم.', reply_to, session)
                     return
+            if agent_result and agent_result.tool_names:
+                log.info('agent_tools_executed tools=%s', ','.join(agent_result.tool_names))
             images = None
             model = session['model']
             if attachment:
@@ -315,7 +318,7 @@ class Bot:
                     model = DEFAULT_MODEL
                     self.api.send(chat_id, 'برای تحلیل عکس از مدل ' + model + ' استفاده می‌کنم.', reply_to)
             history = session['history'] if model == session['model'] else []
-            transport_history = request_history(history, news_context(sources) if sources else '')
+            transport_history = request_history(history, agent_result.context if agent_result else '')
             text_parts = []
             generated = None
             image_started = False
