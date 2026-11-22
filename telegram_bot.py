@@ -223,6 +223,16 @@ class Bot:
             message = dict(message, **{'from': callback.get('from', {})})
         if not message or 'chat' not in message:
             return
+        if not callback and message.get('chat', {}).get('type') in ('group', 'supergroup'):
+            text = (message.get('text') or message.get('caption') or '').strip()
+            bot_name = os.environ.get('TELEGRAM_BOT_USERNAME', '').lstrip('@').lower()
+            mentioned = bool(bot_name and ('@' + bot_name) in text.lower())
+            replied = (message.get('reply_to_message') or {}).get('from', {})
+            replied_to_bot = bool(replied.get('is_bot') and
+                                  (not bot_name or replied.get('username', '').lower() == bot_name))
+            command = text.split(maxsplit=1)[0].split('@')[0].lower() if text else ''
+            if not (mentioned or replied_to_bot or command in ('/start', '/help', '/model', '/models', '/clear', '/new', '/status')):
+                return
         session = self.session(message)
         with session['lock']:
             if callback:
@@ -255,6 +265,11 @@ class Bot:
             session['history'] = []
             session['news_topic'] = None
             self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
+            return
+        if command == '/status':
+            self.api.send(chat_id, 'Trump Agent\\nمدل: ' + session['model'] +
+                          '\\nابزارها: اخبار، محاسبات، تصویر و فایل متنی' +
+                          '\\nحافظه: موقت (در هر نمونهٔ سرور)', reply_to)
             return
         if command in ('/models', '/model'):
             self.api.send(chat_id, 'مدل فعلی: ' + session['model'], reply_to, keyboard())
