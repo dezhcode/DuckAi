@@ -426,7 +426,22 @@ class DuckAI:
         content = [{"type": "text", "text": prompt + prompt_extra}]
         if images:
             content.extend(images)  # same order as the browser: text first, then images
-        msgs = (history or []) + [{"role": "user", "content": content}]
+        # Mirror DuckAiChat's history normalization: do not resend prior image
+        # payloads, and keep assistant turns as plain text.
+        safe_history = []
+        for previous in (history or []):
+            if not isinstance(previous, dict) or previous.get("role") not in ("user", "assistant"):
+                continue
+            previous_content = previous.get("content", "")
+            if previous["role"] == "user" and isinstance(previous_content, list):
+                text_parts = [part for part in previous_content
+                              if isinstance(part, dict) and part.get("type") == "text"
+                              and isinstance(part.get("text"), str)]
+                previous_content = text_parts or [{"type": "text", "text": "..."}]
+            elif not isinstance(previous_content, str):
+                previous_content = ""
+            safe_history.append({"role": previous["role"], "content": previous_content})
+        msgs = safe_history + [{"role": "user", "content": content}]
         body = {
             "model": model,
             "messages": msgs,
