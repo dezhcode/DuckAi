@@ -19,6 +19,7 @@ from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
 from trump_persona import INTRO, IDENTITY, identity_question, request_history, unsupported_personal_claim
 from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
+from duck_search import is_web_search, sources_from_event, format_sources
 from conversation_store import ConversationStore
 
 log = logging.getLogger(__name__)
@@ -312,7 +313,7 @@ class Bot:
             return
         if command == '/status':
             self.api.send(chat_id, 'Trump Agent\\nمدل: ' + session['model'] +
-                          '\\nابزارها: اخبار، محاسبات، تصویر، فایل، ویکی‌پدیا و جستجوی وب' +
+                          '\\nابزارها: جستجوی داخلی Duck.ai، اخبار، محاسبات، تصویر، فایل و ویکی‌پدیا' +
                           '\\nحافظه: ' + ('پایدار' if self.store.enabled else 'موقت'), reply_to)
             return
         if command in ('/models', '/model'):
@@ -369,7 +370,7 @@ class Bot:
             sources = agent_result.sources if agent_result else []
             if agent_result and agent_result.news_topic:
                 session['news_topic'] = agent_result.news_topic
-                if not sources and not attachment and 'web_search' not in agent_result.tool_names and 'encyclopedia_search' not in agent_result.tool_names:
+                if False:  # Duck.ai native search may supply evidence after streaming
                     self.send_answer(chat_id, 'برای این موضوع، خبر تازه و مرتبطی در منابع در دسترس تأیید نکردم. بدون منبع درباره جزئیاتش ادعایی نمی‌کنم.', reply_to, session)
                     return
             if agent_result and agent_result.tool_names:
@@ -396,6 +397,8 @@ class Bot:
             text_parts = []
             generated = None
             image_started = False
+            native_search_seen = False
+            native_urls = []
             # ask()/stream() intentionally discard non-text events. Chat must consume all
             # repository events so the provider can generate images without a slash command.
             with closing(self.response_events(prompt, model=DEFAULT_MODEL if draw else model,
@@ -405,6 +408,11 @@ class Bot:
                         text_parts.append(value)
                     elif kind == 'image':
                         generated = value
+                    elif kind == 'tool' and is_web_search(value):
+                        native_search_seen = True
+                        for url in sources_from_event(value):
+                            if url not in native_urls and len(native_urls) < 5:
+                                native_urls.append(url)
                     if (kind in ('image', 'image_title', 'image_partial') or
                             (kind == 'tool' and value.get('toolName') == 'GenerateImage')):
                         if not image_started:
@@ -417,6 +425,10 @@ class Bot:
             elif draw or image_started:
                 raise DuckAIError('No completed image received')
             answer = ''.join(text_parts)
+            if native_search_seen:
+                log.info('duckai_native_websearch_seen source_count=%d', len(native_urls))
+                if native_urls:
+                    answer += format_sources(native_urls)
             if answer.strip() and sources:
                 answer = finish_answer(answer, sources)
             elif answer.strip() and unsupported_personal_claim(answer):
