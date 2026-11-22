@@ -10,7 +10,9 @@ class WebToolTests(unittest.TestCase):
         self.assertIsNone(requested_web_query('سلام'))
 
     def test_disabled_search(self):
-        self.assertEqual(WebSearch('').search('example'), [])
+        self.assertEqual(WebSearch(base_url='').search('example'), [])
+        self.assertFalse(WebSearch(base_url='http://localhost:8080').enabled)
+        self.assertTrue(WebSearch(base_url='https://search.example.org').enabled)
 
     def test_bounded_two_step_search(self):
         news = Mock()
