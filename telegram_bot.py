@@ -663,7 +663,9 @@ class Bot:
                         getattr(error, 'provider_code', None), getattr(error, 'retry_after', None))
             if getattr(error, 'challenge_diagnostics', None) is not None:
                 log.info('duckai_rejection_diagnostics %s', error.challenge_diagnostics)
-            if (getattr(error, 'status', None) == 418
+            if (getattr(error, 'provider_code', None) == 'ERR_BN_LIMIT'):
+                self.api.send(chat_id, 'Duck.ai در حال حاضر درخواست این سرور را به دلیل محدودیت سرویس نمی‌پذیرد. تکرار فوری درخواست کمکی نمی‌کند؛ لطفاً بعداً امتحان کن.', reply_to)
+            elif (getattr(error, 'status', None) == 418
                     and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
                     and getattr(error, 'retry_after', None) is None):
                 # A challenge rejection without Retry-After is not a provider
