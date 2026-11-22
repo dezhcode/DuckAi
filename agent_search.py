@@ -1,10 +1,11 @@
-"""Bounded general web search via Brave Search API (optional credentials).
+"""Bounded web search via a configured SearXNG instance, no API key required.
 
-No arbitrary URL fetching, shell commands, or model-authored tool calls.
-Set BRAVE_SEARCH_API_KEY to enable. Results are untrusted evidence.
+For serverless deployment configure SEARXNG_URL to a trusted HTTPS instance
+with JSON output enabled. No arbitrary user-controlled URL fetching.
 """
 import os
 import re
+from urllib.parse import urlparse
 import requests
 
 SEARCH_PATTERN = re.compile(
@@ -12,12 +13,18 @@ SEARCH_PATTERN = re.compile(
 
 
 class WebSearch:
-    def __init__(self, api_key=None):
-        self.api_key = api_key if api_key is not None else os.getenv('BRAVE_SEARCH_API_KEY', '')
+    def __init__(self, api_key=None, base_url=None):
+        # api_key retained for backwards-compatible callers, but not used.
+        self.base_url = (base_url if base_url is not None else os.getenv('SEARXNG_URL', '')).rstrip('/')
+        parsed = urlparse(self.base_url)
+        self._valid = (parsed.scheme == 'https' and bool(parsed.hostname)
+                       and not parsed.username and not parsed.password
+                       and not parsed.fragment and not parsed.query
+                       and parsed.path in ('', '/'))
 
     @property
     def enabled(self):
-        return bool(self.api_key)
+        return self._valid
 
     def search(self, query, count=4):
         if not self.enabled:
@@ -25,19 +32,19 @@ class WebSearch:
         query = str(query).strip()[:180]
         if len(query) < 3:
             return []
-        response = requests.get('https://api.search.brave.com/res/v1/web/search',
-            params={'q': query, 'count': min(max(int(count), 1), 5)},
-            headers={'Accept': 'application/json', 'X-Subscription-Token': self.api_key},
-            timeout=(3, 9))
+        response = requests.get(self.base_url + '/search',
+            params={'q': query, 'format': 'json', 'language': 'auto', 'safesearch': 1},
+            headers={'Accept': 'application/json'}, timeout=(3, 8),
+            allow_redirects=False)
         response.raise_for_status()
-        results = response.json().get('web', {}).get('results', [])
+        results = response.json().get('results', [])
         clean = []
-        for item in results[:5]:
+        for item in results[:min(max(int(count), 1), 5)]:
             url = str(item.get('url', ''))
             if not url.startswith('https://') or len(url) > 700:
                 continue
             clean.append({'title': str(item.get('title', ''))[:180],
-                          'snippet': str(item.get('description', ''))[:700],
+                          'snippet': str(item.get('content', ''))[:700],
                           'url': url})
         return clean
 
