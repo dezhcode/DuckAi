@@ -440,8 +440,10 @@ class Bot:
             elif answer.strip() and unsupported_personal_claim(answer):
                 answer = 'این شخصیت شبیه‌سازی‌شده است؛ اقدام واقعی را به خودم نسبت نمی‌دهم. برای بررسی چنین ادعایی، منبع معتبر لازم است.'
             answer = clean_chat_reply(answer)
-            if answer.strip() or not generated:
+            if answer.strip():
                 self.send_answer(chat_id, answer, reply_to, session)
+            elif not generated:
+                raise DuckAIError('Model returned no text', stage='chat')
             # Keep bounded text context, including image-request descriptions for follow-ups.
             session['history'] = (history + [{'role': 'user', 'content': [{'type': 'text', 'text': prompt}]},
                                             {'role': 'assistant', 'content': answer or 'تصویر ساخته شد.'}])[-12:]
