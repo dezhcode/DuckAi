@@ -125,7 +125,7 @@ module.exports = async (req, res) => {
     const result = await chat(req.body || {});
     return res.status(result.ok ? 200 : 502).json(result);
   } catch (err) {
-    console.error('duckai_transport_failure', JSON.stringify({name:err?.name || 'Error', message:String(err?.message || '').replace(/https?:\\/\\/\\S+/g, '[url]').slice(0,140)}));
+    console.error('duckai_transport_failure', err?.name || 'Error');
     return res.status(502).json({ ok: false, status: 502, code: 'TRANSPORT_ERROR' });
   }
 };
