@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from trump_persona import news_query
 from news_reader import context as news_context
 from agent_web import search_encyclopedia
+from agent_search import WebSearch, requested_web_query, render_results
 
 OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
        ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
@@ -51,8 +52,9 @@ class AgentResult:
 
 class TrumpAgent:
     """Deterministic read-only tools; no model-generated code or unbounded loops."""
-    def __init__(self, news_reader):
+    def __init__(self, news_reader, web_search=None):
         self.news_reader = news_reader
+        self.web_search = web_search if web_search is not None else WebSearch()
 
     def prepare(self, prompt, previous_topic=None):
         result = AgentResult()
@@ -79,5 +81,22 @@ class TrumpAgent:
                 result.tool_names.append('encyclopedia_search')
         except (ValueError, KeyError, requests.RequestException):
             pass
+        web_query = requested_web_query(prompt)
+        if web_query and self.web_search.enabled:
+            try:
+                web_results = self.web_search.search(web_query)
+                if web_results:
+                    blocks.append(render_results(web_results))
+                    result.tool_names.append('web_search')
+                    # Second bounded step: search a narrower query when initial evidence is sparse.
+                    if len(web_results) < 2 and len(web_query) > 12:
+                        followup = self.web_search.search(web_query[:100] + ' facts', count=2)
+                        seen = {item['url'] for item in web_results}
+                        followup = [item for item in followup if item['url'] not in seen]
+                        if followup:
+                            blocks.append(render_results(followup))
+                            result.tool_names.append('web_search_followup')
+            except (requests.RequestException, ValueError, TypeError, KeyError):
+                pass
         result.context = '\n\n'.join(blocks)
         return result
