@@ -82,6 +82,50 @@ class RemoteDuckAI(DuckAI):
         return result
 
 
+
+class NodeDuckTransport:
+    """Authenticated bridge to the DuckAiChat-style Node transport.
+
+    The Node service owns challenge state, retries and cookies. Python retains
+    Telegram, persona, history and media orchestration.
+    """
+    def __init__(self, token, url='https://duckai-telegram-bot.vercel.app/api/duck_transport'):
+        self.token = token
+        self.url = os.environ.get('DUCK_TRANSPORT_URL', url)
+        self.s = requests.Session()
+        self._pending_response_challenge = None
+
+    def adopt_response_challenge(self, previous):
+        return False
+
+    def stream_events(self, prompt, **options):
+        secret = hashlib.sha256((self.token + 'duckai-transport').encode()).hexdigest()
+        payload = {
+            'prompt': prompt,
+            'model': options.get('model', DEFAULT_MODEL),
+            'history': options.get('history') or [],
+            'images': options.get('images') or [],
+            'draw': bool(options.get('draw')),
+            'prompt_extra': options.get('prompt_extra', ''),
+        }
+        with self.s.post(self.url, json=payload, headers={'x-duckai-transport': secret},
+                         timeout=(8, 110)) as response:
+            try:
+                result = response.json()
+            except ValueError:
+                raise DuckAIError('Invalid transport response', status=response.status_code,
+                                  stage='chat')
+            if not response.ok or not isinstance(result, dict) or not result.get('ok'):
+                status = result.get('status') if isinstance(result, dict) else response.status_code
+                code = result.get('code') if isinstance(result, dict) else None
+                raise DuckAIError('Duck.ai transport failed', status=status, stage='chat',
+                                  provider_code=code)
+            for event in result.get('events', []):
+                if isinstance(event, dict) and event.get('kind') in (
+                        'message', 'image', 'image_partial', 'image_title', 'tool'):
+                    yield event['kind'], event.get('value')
+
+
 class TelegramAPI:
     def __init__(self, token):
         self.token = token
@@ -244,7 +288,7 @@ class SharedCooldown:
 class Bot:
     def __init__(self, api, client_factory=None, news_reader=None):
         self.api = api
-        self.client_factory = client_factory or (lambda: RemoteDuckAI(api.token))
+        self.client_factory = client_factory or (lambda: NodeDuckTransport(api.token))
         self.news_reader = news_reader if news_reader is not None else NewsReader()
         self.agent = TrumpAgent(self.news_reader)
         self.store = ConversationStore()
