@@ -9,6 +9,7 @@ import os
 import re
 import tempfile
 import threading
+import traceback
 import time
 from pathlib import Path
 from contextlib import closing
@@ -448,14 +449,20 @@ class Bot:
             self.api.send(chat_id, str(error), reply_to)
         except Exception as error:
             # Exception strings can contain a Telegram token or an image payload: never log them.
-            log.warning('request_failed type=%s status=%s stage=%s provider_code=%s retry_after=%s',
-                        type(error).__name__, getattr(error, 'status', None),
-                        getattr(error, 'stage', None), getattr(error, 'provider_code', None),
-                        getattr(error, 'retry_after', None))
+            frames = traceback.extract_tb(error.__traceback__)
+            location = frames[-1] if frames else None
+            log.warning('request_failed type=%s module=%s location=%s:%s status=%s stage=%s provider_code=%s retry_after=%s',
+                        type(error).__name__, type(error).__module__,
+                        os.path.basename(location.filename) if location else 'unknown',
+                        location.lineno if location else 0,
+                        getattr(error, 'status', None), getattr(error, 'stage', None),
+                        getattr(error, 'provider_code', None), getattr(error, 'retry_after', None))
             if (getattr(error, 'status', None) == 418
                     and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
                     and getattr(error, 'retry_after', None) is None):
-                self.api.send(chat_id, 'انجام این درخواست فعلاً ممکن نشد. کمی بعد دوباره امتحان کن.', reply_to)
+                with self.lock:
+                    self.ai_not_before = max(self.ai_not_before, time.monotonic() + 60)
+                self.api.send(chat_id, 'اتصال به سرویس پاسخ‌گویی موقتاً برقرار نشد. لطفاً یک دقیقه بعد دوباره امتحان کن.', reply_to)
             elif getattr(error, 'status', None) in (418, 429):
                 seconds = max(30, getattr(error, 'retry_after', None) or 0)
                 with self.lock:
