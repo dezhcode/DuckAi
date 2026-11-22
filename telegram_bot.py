@@ -126,6 +126,45 @@ class NodeDuckTransport:
                     yield event['kind'], event.get('value')
 
 
+
+def configured_text_fallback(prompt, options):
+    """Optional OpenAI-compatible fallback. No secret or provider is hard-coded."""
+    endpoint = os.environ.get('FALLBACK_CHAT_COMPLETIONS_URL', '').strip()
+    key = os.environ.get('FALLBACK_API_KEY', '').strip()
+    model = os.environ.get('FALLBACK_MODEL', '').strip()
+    if not (endpoint and key and model):
+        return None
+    from urllib.parse import urlparse
+    parsed = urlparse(endpoint)
+    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password:
+        raise DuckAIError('Invalid fallback endpoint configuration', stage='chat')
+    if options.get('draw') or options.get('images'):
+        return None
+    messages = []
+    for item in (options.get('history') or [])[-12:]:
+        if not isinstance(item, dict) or item.get('role') not in ('user', 'assistant', 'system'):
+            continue
+        parts = item.get('content', [])
+        content = ' '.join(p.get('text', '') for p in parts if isinstance(p, dict) and p.get('type') == 'text') if isinstance(parts, list) else str(parts)
+        if content:
+            messages.append({'role': item['role'], 'content': content[:12000]})
+    messages.append({'role': 'user', 'content': (prompt + options.get('prompt_extra', ''))[:24000]})
+    try:
+        response = requests.post(endpoint, json={'model': model, 'messages': messages, 'stream': False},
+                                 headers={'Authorization': 'Bearer ' + key, 'Content-Type': 'application/json'},
+                                 timeout=(8, 55))
+        response.raise_for_status()
+        data = response.json()
+        content = data['choices'][0]['message']['content']
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError('Empty fallback completion')
+        log.info('fallback_text_completed provider=compatible')
+        return content
+    except (requests.RequestException, ValueError, KeyError, IndexError, TypeError):
+        log.warning('fallback_text_failed')
+        return None
+
+
 class TelegramAPI:
     def __init__(self, token):
         self.token = token
@@ -722,6 +761,12 @@ class Bot:
                     and error.retry_after is None
                 )
                 if not retryable:
+                    if not emitted and error.status in (418, 429, 500, 502, 503, 504):
+                        fallback_text = configured_text_fallback(prompt, options)
+                        if fallback_text:
+                            yield 'message', fallback_text
+                            completed = True
+                            return
                     raise
                 log.info('challenge_rejected attempt=%d response_challenge=%s diagnostics=%s',
                          attempt + 1, bool(client._pending_response_challenge),
