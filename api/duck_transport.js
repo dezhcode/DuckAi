@@ -19,7 +19,7 @@ function proof(solved) {
   const p = { ...solved };
   p.client_hashes = (solved.client_hashes || []).map(x => crypto.createHash('sha256').update(x).digest('base64'));
   p.meta = { ...(solved.meta || {}), origin: BASE,
-    stack: 'Error\\nat l (https://duck.ai/dist/duckai-dist/entry.duckai.js:2:2129171)\\nat async https://duck.ai/dist/duckai-dist/entry.duckai.js:2:1859809',
+    stack: 'Error\nat l (https://duck.ai/dist/duckai-dist/entry.duckai.js:2:2129171)\nat async https://duck.ai/dist/duckai-dist/entry.duckai.js:2:1859809',
     duration: '58' };
   return b64(p);
 }
@@ -94,7 +94,7 @@ async function chat(body) {
       while (true) {
         const { value, done } = await reader.read(); if (done) break;
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\\n'); buffer = lines.pop();
+        const lines = buffer.split('\n'); buffer = lines.pop();
         for (const line of lines) { const ev = parse(line.trim()); if (ev) events.push(ev); }
       }
       if (buffer) { const ev = parse(buffer.trim()); if (ev) events.push(ev); }
