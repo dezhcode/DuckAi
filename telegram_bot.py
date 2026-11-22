@@ -328,7 +328,7 @@ class Bot:
         retry_after = None
         for index in range(10):
             with self.lock:
-                remaining = max(0, max(math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining()), self.shared_cooldown.remaining())
+                remaining = max(0, math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining())
             if remaining:
                 stop_reason = 'cooldown_active'
                 log.info('simulation_skipped reason=cooldown_active remaining_s=%d', remaining)
