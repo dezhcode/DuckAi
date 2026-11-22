@@ -485,6 +485,17 @@ class DuckAI:
                 break
             status = r.status_code
             last = DuckAIError.from_response(r, 'chat')
+            # Safe diagnostics: do not log cookies, proofs, prompts or response bodies.
+            last.challenge_diagnostics = {
+                'status_challenge_present': bool(self.jsa),
+                'response_challenge_present': bool(response_challenge),
+                'session_cookie_count': len(self.s.cookies),
+                'frontend_version_present': bool(self.fe_version),
+                'model': model,
+                'history_messages': len(history or []),
+                'has_images': bool(images),
+                'draw': bool(draw),
+            }
             r.close()
             # A previously accepted conversation proof may expire. Refresh it once,
             # as the CLI does, only for this explicit protocol error. A newly fetched
