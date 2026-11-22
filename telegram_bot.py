@@ -463,9 +463,9 @@ class Bot:
             if (getattr(error, 'status', None) == 418
                     and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
                     and getattr(error, 'retry_after', None) is None):
-                with self.lock:
-                    self.ai_not_before = max(self.ai_not_before, time.monotonic() + 60)
-                self.api.send(chat_id, 'اتصال به سرویس پاسخ‌گویی موقتاً برقرار نشد. لطفاً یک دقیقه بعد دوباره امتحان کن.', reply_to)
+                # A challenge rejection without Retry-After is not a provider
+                # instruction to impose a global cooldown on all users.
+                self.api.send(chat_id, 'Duck.ai پس از چند تلاش مستقل درخواست را رد کرد. اتصال مدل موقتاً برقرار نشد؛ لطفاً دوباره امتحان کن.', reply_to)
             elif getattr(error, 'status', None) in (418, 429):
                 seconds = max(30, getattr(error, 'retry_after', None) or 0)
                 with self.lock:
