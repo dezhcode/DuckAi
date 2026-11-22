@@ -3,6 +3,19 @@
 const crypto = require('crypto');
 const { solveChallenge } = require('../jsa_jsdom');
 const BASE = 'https://duck.ai';
+// Optional authorized egress proxy. All Duck.ai requests must share the same
+// network identity, including bootstrap, status, and chat.
+const proxyUrl = (process.env.DUCK_PROXY || '').trim();
+let duckFetch = fetch;
+if (proxyUrl) {
+  const { ProxyAgent, fetch: undiciFetch } = require('undici');
+  const parsed = new URL(proxyUrl);
+  if (!['http:', 'https:'].includes(parsed.protocol)) throw Error('DUCK_PROXY must be HTTP(S)');
+  const dispatcher = new ProxyAgent(proxyUrl);
+  duckFetch = (url, init) => undiciFetch(url, { ...init, dispatcher });
+  console.info('duck_transport_proxy_enabled');
+}
+
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 const state = { feVersion: '', jsa: '', cookies: new Map() };
 let inFlightHandshake = null;
@@ -32,14 +45,14 @@ async function handshake() {
   if (inFlightHandshake) return inFlightHandshake;
   inFlightHandshake = (async () => {
     const headers = { 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9' };
-    const boot = await fetch(BASE + '/', { headers, signal: AbortSignal.timeout(15000) });
+    const boot = await duckFetch(BASE + '/', { headers, signal: AbortSignal.timeout(15000) });
     if (!boot.ok) throw Error('Bootstrap HTTP ' + boot.status);
     console.info('transport_bootstrap', JSON.stringify({status:boot.status, cookiesBefore:state.cookies.size}));
     cookies(boot.headers);
     const html = await boot.text();
     state.feVersion = (html.match(/data-version-tag="([^"]*)"/)?.[1] || 'dev') + '-' +
       (html.match(/data-version-sha="([^"]*)"/)?.[1] || 'hash');
-    const status = await fetch(BASE + '/duckchat/v1/status', { headers: {
+    const status = await duckFetch(BASE + '/duckchat/v1/status', { headers: {
       ...headers, 'x-vqd-accept': '1', 'Cache-Control': 'no-store',
       'x-fe-version': state.feVersion, Origin: BASE, Referer: BASE + '/',
       ...(cookieHeader() ? { Cookie: cookieHeader() } : {}) },
@@ -82,7 +95,7 @@ async function chat(body) {
       reasoningEffort: model === 'tinfoil/gpt-oss-120b' ? 'low' : 'none',
       canUseApproxLocation: null, canDelegateImageGeneration: null, canShowGreeting: false };
     if (body.draw) payload.metadata = { toolChoice: { GenerateImage: true } };
-    const response = await fetch(BASE + '/duckchat/v1/chat', { method: 'POST',
+    const response = await duckFetch(BASE + '/duckchat/v1/chat', { method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Origin: BASE,
         Referer: BASE + '/', 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9',
         'x-fe-version': state.feVersion,
