@@ -71,6 +71,7 @@ function parse(line) {
 }
 async function chat(body) {
   let lastStatus = 502;
+  let lastProviderCode = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt || !state.feVersion || !state.jsa) await handshake();
     const model = body.model || 'gpt-6-luna';
@@ -113,6 +114,7 @@ async function chat(body) {
         let errorData = JSON.parse(rawError);
         const safeCode = typeof errorData?.code === 'string' ? errorData.code.slice(0, 80) : null;
         const safeType = typeof errorData?.type === 'string' ? errorData.type.slice(0, 80) : null;
+        if (safeType === 'ERR_BN_LIMIT') lastProviderCode = safeType;
         console.warn('transport_rejection_diagnostic', JSON.stringify({
           status: lastStatus, providerCode: safeCode, providerType: safeType,
           jsonKeys: errorData && typeof errorData === 'object' ? Object.keys(errorData).slice(0, 12) : []
@@ -127,7 +129,7 @@ async function chat(body) {
     if ([418, 429, 401, 403].includes(lastStatus)) break;
     if (attempt < 1) await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
   }
-  return { ok: false, status: lastStatus, code: lastStatus === 418 ? 'ERR_CHALLENGE' : 'UPSTREAM_ERROR' };
+  return { ok: false, status: lastStatus, code: lastProviderCode || (lastStatus === 418 ? 'ERR_CHALLENGE' : 'UPSTREAM_ERROR') };
 }
 module.exports = async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
