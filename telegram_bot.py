@@ -19,6 +19,7 @@ from duck_cli import DuckAI, DuckAIError, MODELS, image_to_data_url
 from trump_persona import INTRO, IDENTITY, identity_question, request_history, unsupported_personal_claim
 from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
+from conversation_store import ConversationStore
 
 log = logging.getLogger(__name__)
 DEFAULT_MODEL = MODELS['luna']
@@ -180,6 +181,7 @@ class Bot:
         self.client_factory = client_factory or (lambda: RemoteDuckAI(api.token))
         self.news_reader = news_reader if news_reader is not None else NewsReader()
         self.agent = TrumpAgent(self.news_reader)
+        self.store = ConversationStore()
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
@@ -209,6 +211,14 @@ class Bot:
                     del self.sessions[idle]
                 self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'introduced': False, 'news_topic': None,
                                       'lock': threading.Lock(), 'used': now}
+                try:
+                    stored = self.store.load(*key)
+                    if stored.get('model') in MODEL_IDS:
+                        self.sessions[key]['model'] = stored['model']
+                    self.sessions[key]['history'] = stored.get('history', [])
+                    self.sessions[key]['news_topic'] = stored.get('news_topic')
+                except (requests.RequestException, ValueError, TypeError, KeyError):
+                    log.warning('conversation_load_failed')
             self.sessions[key]['used'] = now
             return self.sessions[key]
 
@@ -242,10 +252,17 @@ class Bot:
                 return
         session = self.session(message)
         with session['lock']:
-            if callback:
-                self.callback(callback, message, session)
-            else:
-                self.message(message, session)
+            try:
+                if callback:
+                    self.callback(callback, message, session)
+                else:
+                    self.message(message, session)
+            finally:
+                try:
+                    key = (message['chat']['id'], message.get('from', {}).get('id', message['chat']['id']))
+                    self.store.save(*key, session)
+                except (requests.RequestException, ValueError, TypeError):
+                    log.warning('conversation_save_failed')
 
     def callback(self, callback, message, session):
         model = callback.get('data', '').removeprefix('model:')
@@ -271,6 +288,10 @@ class Bot:
         if command in ('/clear', '/new'):
             session['history'] = []
             session['news_topic'] = None
+            try:
+                self.store.clear(chat_id, message.get('from', {}).get('id', chat_id))
+            except (requests.RequestException, ValueError):
+                log.warning('conversation_clear_failed')
             self.api.send(chat_id, 'حافظه گفتگو پاک شد.', reply_to)
             return
         if command == '/export':
@@ -292,7 +313,7 @@ class Bot:
         if command == '/status':
             self.api.send(chat_id, 'Trump Agent\\nمدل: ' + session['model'] +
                           '\\nابزارها: اخبار، محاسبات، تصویر و فایل متنی' +
-                          '\\nحافظه: موقت (در هر نمونهٔ سرور)', reply_to)
+                          '\\nحافظه: ' + ('پایدار' if self.store.enabled else 'موقت'), reply_to)
             return
         if command in ('/models', '/model'):
             self.api.send(chat_id, 'مدل فعلی: ' + session['model'], reply_to, keyboard())
