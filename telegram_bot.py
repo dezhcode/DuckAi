@@ -196,7 +196,7 @@ class Bot:
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
-        self.ai_gate = threading.BoundedSemaphore(1)
+        self.ai_gate = threading.BoundedSemaphore(4)
         self.ai_not_before = 0
         self.limit_status = None
         self.limit_code = None
@@ -469,12 +469,18 @@ class Bot:
                 # instruction to impose a global cooldown on all users.
                 self.api.send(chat_id, 'Duck.ai پس از چند تلاش مستقل درخواست را رد کرد. اتصال مدل موقتاً برقرار نشد؛ لطفاً دوباره امتحان کن.', reply_to)
             elif getattr(error, 'status', None) in (418, 429):
-                seconds = max(30, getattr(error, 'retry_after', None) or 0)
-                with self.lock:
-                    self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
-                    self.limit_status = error.status
-                    self.limit_code = getattr(error, 'provider_code', None)
-                self.api.send(chat_id, self.limit_message(seconds), reply_to)
+                # A challenge rejection is per-request, not evidence of a
+                # provider-wide outage. Do not block unrelated users for 30s.
+                retry_after = getattr(error, 'retry_after', None)
+                if error.status == 429 or retry_after is not None:
+                    seconds = max(1, retry_after or 30)
+                    with self.lock:
+                        self.ai_not_before = max(self.ai_not_before, time.monotonic() + seconds)
+                        self.limit_status = error.status
+                        self.limit_code = getattr(error, 'provider_code', None)
+                    self.api.send(chat_id, self.limit_message(seconds), reply_to)
+                else:
+                    self.api.send(chat_id, 'Duck.ai این درخواست را نپذیرفت. لطفاً دوباره تلاش کن.', reply_to)
             else:
                 self.api.send(chat_id, 'انجام درخواست ناموفق بود. کمی بعد دوباره تلاش کن؛ اگر عکس می‌فرستی، از معتبر بودن فایل مطمئن شو.', reply_to)
         finally:
