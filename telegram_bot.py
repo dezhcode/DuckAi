@@ -33,7 +33,7 @@ def clean_chat_reply(text):
 
 
 log = logging.getLogger(__name__)
-DEFAULT_MODEL = MODELS['luna']
+DEFAULT_MODEL = MODELS['haiku']
 MODEL_IDS = list(dict.fromkeys(MODELS[k] for k in ('luna', 'mini', 'haiku', 'mistral', 'oss', 'gemma')))
 VISION_MODELS = set(MODEL_IDS) - {MODELS['oss']}
 MAX_FILE_BYTES = 15 * 1024 * 1024
