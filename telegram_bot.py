@@ -275,7 +275,47 @@ class Bot:
                 except (requests.RequestException, ValueError, TypeError):
                     log.warning('conversation_save_failed')
 
+    def simulation_allowed(self, message):
+        """Only an explicitly configured Telegram user may run live provider tests."""
+        admin_id = os.environ.get('TELEGRAM_ADMIN_ID', '').strip()
+        return bool(admin_id and str(message.get('from', {}).get('id')) == admin_id
+                    and message.get('chat', {}).get('type') == 'private')
+
+    def run_simulation(self, message):
+        """Three small, sequential live checks; never modify conversation history."""
+        chat_id = message['chat']['id']
+        successes = 0
+        durations = []
+        for index in range(3):
+            started = time.monotonic()
+            status = 'ok'
+            try:
+                with closing(self.response_events(
+                        'Reply with only OK.', model=DEFAULT_MODEL, history=[])) as events:
+                    for _kind, _value in events:
+                        pass
+                successes += 1
+            except (DuckAIError, requests.RequestException) as error:
+                status = ('http_' + str(error.status)) if isinstance(error, DuckAIError) else 'network_error'
+            elapsed = round(time.monotonic() - started, 2)
+            durations.append(elapsed)
+            log.info('simulation_check index=%d status=%s duration_s=%.2f', index + 1, status, elapsed)
+            if index < 2:
+                time.sleep(1)
+        log.info('simulation_finished success=%d total=3', successes)
+        self.api.send(chat_id, 'نتیجه شبیه‌سازی Duck.ai: ' + str(successes) +
+                      ' پاسخ موفق از ۳ درخواست\\nزمان هر درخواست (ثانیه): ' +
+                      ', '.join(str(value) for value in durations) +
+                      '\\nجزئیات خطاها در لاگ Vercel ثبت شد.')
+
     def callback(self, callback, message, session):
+        if callback.get('data') == 'simulation:run':
+            allowed = self.simulation_allowed(message)
+            self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'],
+                                                 'text': 'تست شروع شد' if allowed else 'دسترسی ندارید'})
+            if allowed:
+                self.run_simulation(message)
+            return
         model = callback.get('data', '').removeprefix('model:')
         valid = callback.get('data', '').startswith('model:') and model in MODEL_IDS
         self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'],
@@ -292,6 +332,13 @@ class Bot:
         command = parts[0] if parts else ''
         argument = parts[1] if len(parts) > 1 else ''
         command = command.split('@')[0].lower()
+        if command == '/simulate':
+            if not self.simulation_allowed(message):
+                self.api.send(chat_id, 'این ابزار فقط برای مدیر ربات فعال است.', reply_to)
+                return
+            self.api.send(chat_id, 'تست کنترل‌شده: ۳ درخواست واقعی، با فاصله ۱ ثانیه.\\nبرای شروع دکمه را بزن.',
+                          reply_to, {'inline_keyboard': [[{'text': '🧪 شروع شبیه‌سازی', 'callback_data': 'simulation:run'}]]})
+            return
         if command in ('/start', '/help'):
             self.api.send(chat_id, HELP, reply_to)
             session['introduced'] = True
