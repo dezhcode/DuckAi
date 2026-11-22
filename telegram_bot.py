@@ -716,7 +716,7 @@ class Bot:
                 return
             except DuckAIError as error:
                 retryable = (
-                    attempt == 0 and not emitted and error.status == 418
+                    attempt == 0 and not isinstance(client, NodeDuckTransport) and not emitted and error.status == 418
                     and error.stage == 'chat'
                     and error.provider_code == 'ERR_CHALLENGE'
                     and error.retry_after is None
