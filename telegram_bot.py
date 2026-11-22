@@ -483,12 +483,19 @@ class Bot:
         session['introduced'] = True
 
     def response_events(self, prompt, **options):
-        # A rejected challenge is retried with a fresh HTTP session and proof.
-        # Keep retries bounded for serverless execution and respect provider waits.
+        # Continue an explicit response challenge with the cookies and frontend
+        # version that received it; otherwise start a clean session.
+        # Never retry after partial output or a provider-specified wait.
+        previous = None
         for attempt in range(3):
             client = self.client_factory()
             emitted = False
             try:
+                if previous is not None:
+                    adopted = client.adopt_response_challenge(previous)
+                    log.info('challenge_retry attempt=%d source=%s',
+                             attempt + 1, 'response_challenge' if adopted else 'fresh_handshake')
+                    previous = None
                 with closing(client.stream_events(prompt, retries=1, **options)) as events:
                     for event in events:
                         emitted = True
@@ -503,7 +510,9 @@ class Bot:
                 )
                 if not retryable:
                     raise
-                log.info('challenge_retry attempt=%d source=fresh_session', attempt + 2)
+                log.info('challenge_rejected attempt=%d response_challenge=%s',
+                         attempt + 1, bool(client._pending_response_challenge))
+                previous = client
             finally:
                 client.s.close()
 
