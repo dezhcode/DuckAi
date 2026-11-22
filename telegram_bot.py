@@ -230,10 +230,15 @@ class SharedCooldown:
         """Atomically deduplicate Telegram retries across warm instances."""
         if not self.enabled or update_id is None:
             return True
-        result = self.command('SET', 'duckai:telegram:update:' + str(update_id),
-                              '1', 'EX', '600', 'NX')
+        # EVAL returns 1 for a new update and 0 for an existing one.
+        # Unlike SET NX, Redis's null response cannot be confused with an
+        # unavailable Upstash REST endpoint (which command() also maps to None).
+        script = ("if redis.call('EXISTS',KEYS[1]) == 1 then return 0 end; "
+                  "redis.call('SET',KEYS[1],'1','EX',ARGV[1]); return 1")
+        result = self.command('EVAL', script, '1',
+                              'duckai:telegram:update:' + str(update_id), '600')
         # Fail open on Redis errors to avoid silently dropping user messages.
-        return result == 'OK' if result is not None else True
+        return result != 0
 
 
 class Bot:
