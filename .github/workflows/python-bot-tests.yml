@@ -1,0 +1,17 @@
+name: Python bot tests
+on:
+  push:
+    branches: [codex/trump-persona-grounded-news]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r requirements.txt
+      - run: python -m compileall -q telegram_bot.py trump_agent.py trump_persona.py news_reader.py conversation_store.py duck_cli.py api
+      - run: python -m unittest discover -s tests -v

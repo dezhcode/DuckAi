@@ -5,7 +5,8 @@
   "description": "Node dependencies for the DuckAi CLI (jsdom runs the duck.ai challenge)",
   "main": "jsa_jsdom.js",
   "dependencies": {
-    "jsdom": "26.1.0"
+    "jsdom": "26.1.0",
+    "undici": "^7.16.0"
   },
   "scripts": {
     "test": "node --test tests/solver.test.js"
