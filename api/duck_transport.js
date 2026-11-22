@@ -106,7 +106,23 @@ async function chat(body) {
       return { ok: true, events };
     }
     lastStatus = response.status;
-    await response.body?.cancel().catch(() => {});
+    if (lastStatus === 418) {
+      // Log only error metadata, never request contents or challenge tokens.
+      try {
+        const rawError = (await response.text()).slice(0, 4096);
+        let errorData = JSON.parse(rawError);
+        const safeCode = typeof errorData?.code === 'string' ? errorData.code.slice(0, 80) : null;
+        const safeType = typeof errorData?.type === 'string' ? errorData.type.slice(0, 80) : null;
+        console.warn('transport_rejection_diagnostic', JSON.stringify({
+          status: lastStatus, providerCode: safeCode, providerType: safeType,
+          jsonKeys: errorData && typeof errorData === 'object' ? Object.keys(errorData).slice(0, 12) : []
+        }));
+      } catch {
+        console.warn('transport_rejection_diagnostic', JSON.stringify({status:lastStatus, responseFormat:'not-json'}));
+      }
+    } else {
+      await response.body?.cancel().catch(() => {});
+    }
     if (!next) state.jsa = '';
     if ([418, 429, 401, 403].includes(lastStatus)) break;
     if (attempt < 1) await new Promise(resolve => setTimeout(resolve, (attempt + 1) * 1000));
