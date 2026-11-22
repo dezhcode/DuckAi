@@ -282,13 +282,15 @@ class Bot:
                     and message.get('chat', {}).get('type') == 'private')
 
     def run_simulation(self, message):
-        """Ten bounded sequential checks; no conversation history changes."""
+        """Up to ten sequential checks; stop promptly when provider rate-limits."""
         chat_id = message['chat']['id']
         successes = 0
         results = []
+        stopped = False
         for index in range(10):
             started = time.monotonic()
             status = 'ok'
+            retry_after = None
             try:
                 with closing(self.response_events(
                         'Reply with only OK.', model=DEFAULT_MODEL, history=[])) as events:
@@ -297,16 +299,29 @@ class Bot:
                 successes += 1
             except (DuckAIError, requests.RequestException) as error:
                 status = ('http_' + str(error.status)) if isinstance(error, DuckAIError) else 'network_error'
+                if isinstance(error, DuckAIError):
+                    retry_after = error.retry_after
+                    if error.status == 429:
+                        stopped = True
             elapsed = round(time.monotonic() - started, 2)
             results.append((status, elapsed))
-            log.info('simulation_check index=%d status=%s duration_s=%.2f', index + 1, status, elapsed)
+            log.info('simulation_check index=%d status=%s duration_s=%.2f retry_after=%s',
+                     index + 1, status, elapsed, retry_after)
+            if stopped:
+                log.warning('simulation_stopped reason=provider_rate_limit completed=%d retry_after=%s',
+                            len(results), retry_after)
+                break
             if index < 9:
                 time.sleep(1)
-        log.info('simulation_finished success=%d total=10', successes)
+        log.info('simulation_finished success=%d attempted=%d max_requests=10 stopped=%s',
+                 successes, len(results), stopped)
         details = '\\n'.join(str(i + 1) + '. ' + status + ' — ' + str(duration) + 's'
                             for i, (status, duration) in enumerate(results))
+        note = ('\\nتست با خطای 429 متوقف شد تا درخواست اضافی ارسال نشود.'
+                if stopped else '')
         self.api.send(chat_id, 'نتیجه شبیه‌سازی Duck.ai: ' + str(successes) +
-                      ' پاسخ موفق از ۱۰ درخواست\\n' + details +
+                      ' پاسخ موفق از ' + str(len(results)) +
+                      ' درخواست اجراشده (حداکثر ۱۰)\\n' + details + note +
                       '\\nجزئیات در لاگ Vercel ثبت شد.')
 
     def callback(self, callback, message, session):
@@ -337,7 +352,7 @@ class Bot:
             if not self.simulation_allowed(message):
                 self.api.send(chat_id, 'این ابزار فقط برای مدیر ربات فعال است.', reply_to)
                 return
-            self.api.send(chat_id, 'تست کنترل‌شده: ۱۰ درخواست واقعی، با فاصله ۱ ثانیه.\\nبرای شروع دکمه را بزن.',
+            self.api.send(chat_id, 'تست کنترل‌شده: حداکثر ۱۰ درخواست با فاصله ۱ ثانیه؛ با خطای 429 متوقف می‌شود.\\nبرای شروع دکمه را بزن.',
                           reply_to, {'inline_keyboard': [[{'text': '🧪 شروع شبیه‌سازی', 'callback_data': 'simulation:run'}]]})
             return
         if command in ('/start', '/help'):
