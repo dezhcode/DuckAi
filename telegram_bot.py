@@ -282,11 +282,13 @@ class Bot:
                     and message.get('chat', {}).get('type') == 'private')
 
     def run_simulation(self, message):
-        """Up to ten sequential checks; stop promptly when provider rate-limits."""
+        """Bounded diagnostic checks; stop on 429 or repeated 418 rejections."""
         chat_id = message['chat']['id']
         successes = 0
         results = []
-        stopped = False
+        consecutive_challenges = 0
+        stop_reason = None
+        retry_after = None
         for index in range(10):
             started = time.monotonic()
             status = 'ok'
@@ -297,28 +299,38 @@ class Bot:
                     for _kind, _value in events:
                         pass
                 successes += 1
+                consecutive_challenges = 0
             except (DuckAIError, requests.RequestException) as error:
                 status = ('http_' + str(error.status)) if isinstance(error, DuckAIError) else 'network_error'
                 if isinstance(error, DuckAIError):
                     retry_after = error.retry_after
                     if error.status == 429:
-                        stopped = True
+                        stop_reason = 'rate_limit_429'
+                    elif error.status == 418 and error.provider_code == 'ERR_CHALLENGE':
+                        consecutive_challenges += 1
+                        if consecutive_challenges >= 3:
+                            stop_reason = 'repeated_challenge_418'
+                    else:
+                        consecutive_challenges = 0
+                else:
+                    consecutive_challenges = 0
             elapsed = round(time.monotonic() - started, 2)
             results.append((status, elapsed))
             log.info('simulation_check index=%d status=%s duration_s=%.2f retry_after=%s',
                      index + 1, status, elapsed, retry_after)
-            if stopped:
-                log.warning('simulation_stopped reason=provider_rate_limit completed=%d retry_after=%s',
-                            len(results), retry_after)
+            if stop_reason:
+                log.warning('simulation_stopped reason=%s completed=%d retry_after=%s',
+                            stop_reason, len(results), retry_after)
                 break
             if index < 9:
                 time.sleep(1)
-        log.info('simulation_finished success=%d attempted=%d max_requests=10 stopped=%s',
-                 successes, len(results), stopped)
+        counts = {key: sum(1 for status, _ in results if status == key)
+                  for key in ('ok', 'http_418', 'http_429', 'network_error')}
+        log.info('simulation_finished success=%d attempted=%d max_requests=10 stopped=%s counts=%s',
+                 successes, len(results), bool(stop_reason), counts)
         details = '\\n'.join(str(i + 1) + '. ' + status + ' — ' + str(duration) + 's'
                             for i, (status, duration) in enumerate(results))
-        note = ('\\nتست با خطای 429 متوقف شد تا درخواست اضافی ارسال نشود.'
-                if stopped else '')
+        note = ('\\nتوقف زودهنگام: ' + stop_reason if stop_reason else '')
         self.api.send(chat_id, 'نتیجه شبیه‌سازی Duck.ai: ' + str(successes) +
                       ' پاسخ موفق از ' + str(len(results)) +
                       ' درخواست اجراشده (حداکثر ۱۰)\\n' + details + note +
@@ -352,7 +364,7 @@ class Bot:
             if not self.simulation_allowed(message):
                 self.api.send(chat_id, 'این ابزار فقط برای مدیر ربات فعال است.', reply_to)
                 return
-            self.api.send(chat_id, 'تست کنترل‌شده: حداکثر ۱۰ درخواست با فاصله ۱ ثانیه؛ با خطای 429 متوقف می‌شود.\\nبرای شروع دکمه را بزن.',
+            self.api.send(chat_id, 'تست کنترل‌شده: حداکثر ۱۰ درخواست با فاصله ۱ ثانیه؛ با خطای 429 یا سه خطای 418 پیاپی متوقف می‌شود.\\nبرای شروع دکمه را بزن.',
                           reply_to, {'inline_keyboard': [[{'text': '🧪 شروع شبیه‌سازی', 'callback_data': 'simulation:run'}]]})
             return
         if command in ('/start', '/help'):
