@@ -282,11 +282,11 @@ class Bot:
                     and message.get('chat', {}).get('type') == 'private')
 
     def run_simulation(self, message):
-        """Three small, sequential live checks; never modify conversation history."""
+        """Ten bounded sequential checks; no conversation history changes."""
         chat_id = message['chat']['id']
         successes = 0
-        durations = []
-        for index in range(3):
+        results = []
+        for index in range(10):
             started = time.monotonic()
             status = 'ok'
             try:
@@ -298,15 +298,16 @@ class Bot:
             except (DuckAIError, requests.RequestException) as error:
                 status = ('http_' + str(error.status)) if isinstance(error, DuckAIError) else 'network_error'
             elapsed = round(time.monotonic() - started, 2)
-            durations.append(elapsed)
+            results.append((status, elapsed))
             log.info('simulation_check index=%d status=%s duration_s=%.2f', index + 1, status, elapsed)
-            if index < 2:
+            if index < 9:
                 time.sleep(1)
-        log.info('simulation_finished success=%d total=3', successes)
+        log.info('simulation_finished success=%d total=10', successes)
+        details = '\\n'.join(str(i + 1) + '. ' + status + ' — ' + str(duration) + 's'
+                            for i, (status, duration) in enumerate(results))
         self.api.send(chat_id, 'نتیجه شبیه‌سازی Duck.ai: ' + str(successes) +
-                      ' پاسخ موفق از ۳ درخواست\\nزمان هر درخواست (ثانیه): ' +
-                      ', '.join(str(value) for value in durations) +
-                      '\\nجزئیات خطاها در لاگ Vercel ثبت شد.')
+                      ' پاسخ موفق از ۱۰ درخواست\\n' + details +
+                      '\\nجزئیات در لاگ Vercel ثبت شد.')
 
     def callback(self, callback, message, session):
         if callback.get('data') == 'simulation:run':
@@ -336,7 +337,7 @@ class Bot:
             if not self.simulation_allowed(message):
                 self.api.send(chat_id, 'این ابزار فقط برای مدیر ربات فعال است.', reply_to)
                 return
-            self.api.send(chat_id, 'تست کنترل‌شده: ۳ درخواست واقعی، با فاصله ۱ ثانیه.\\nبرای شروع دکمه را بزن.',
+            self.api.send(chat_id, 'تست کنترل‌شده: ۱۰ درخواست واقعی، با فاصله ۱ ثانیه.\\nبرای شروع دکمه را بزن.',
                           reply_to, {'inline_keyboard': [[{'text': '🧪 شروع شبیه‌سازی', 'callback_data': 'simulation:run'}]]})
             return
         if command in ('/start', '/help'):
