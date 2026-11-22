@@ -269,12 +269,18 @@ class Bot:
             now = time.monotonic()
             for old_key, item in list(self.sessions.items()):
                 if now - item['used'] > 1800 and not item['lock'].locked():
+                    old_client = item.pop('_duck_client', None)
+                    if old_client is not None:
+                        old_client.s.close()
                     del self.sessions[old_key]
             if key not in self.sessions:
                 if len(self.sessions) >= 256:
                     idle = next((k for k, v in self.sessions.items() if not v['lock'].locked()), None)
                     if idle is None:
                         raise TelegramError('Bot is busy')
+                    old_client = self.sessions[idle].pop('_duck_client', None)
+                    if old_client is not None:
+                        old_client.s.close()
                     del self.sessions[idle]
                 self.sessions[key] = {'model': DEFAULT_MODEL, 'history': [], 'introduced': False, 'news_topic': None,
                                       'lock': threading.Lock(), 'used': now}
@@ -558,7 +564,8 @@ class Bot:
             # ask()/stream() intentionally discard non-text events. Chat must consume all
             # repository events so the provider can generate images without a slash command.
             with closing(self.response_events(prompt, model=DEFAULT_MODEL if draw else model,
-                                              history=transport_history, images=images, draw=draw)) as events:
+                                              history=transport_history, images=images, draw=draw,
+                                              provider_session=session)) as events:
                 for kind, value in events:
                     if kind == 'message':
                         text_parts.append(value)
@@ -639,13 +646,17 @@ class Bot:
         self.api.send(chat_id, answer, reply_to)
         session['introduced'] = True
 
-    def response_events(self, prompt, **options):
-        # Continue an explicit response challenge with the cookies and frontend
-        # version that received it; otherwise start a clean session.
-        # Never retry after partial output or a provider-specified wait.
+    def response_events(self, prompt, provider_session=None, **options):
+        """Reuse a warm provider session only for the same Telegram conversation.
+
+        DuckAiChat caches its session state between messages. Keep that state
+        isolated per user and discard it on provider rejection or failure.
+        """
         previous = None
+        cached = provider_session.pop('_duck_client', None) if provider_session is not None else None
         for attempt in range(2):
-            client = self.client_factory()
+            client = cached if attempt == 0 and cached is not None else self.client_factory()
+            completed = False
             emitted = False
             try:
                 if previous is not None:
@@ -657,6 +668,7 @@ class Bot:
                     for event in events:
                         emitted = True
                         yield event
+                completed = True
                 return
             except DuckAIError as error:
                 retryable = (
@@ -672,7 +684,13 @@ class Bot:
                          getattr(error, 'challenge_diagnostics', None))
                 previous = client
             finally:
-                client.s.close()
+                if completed and provider_session is not None:
+                    old = provider_session.pop('_duck_client', None)
+                    if old is not None and old is not client:
+                        old.s.close()
+                    provider_session['_duck_client'] = client
+                else:
+                    client.s.close()
 
     def upload_generated(self, chat_id, generated, reply_to):
         from PIL import Image
