@@ -177,13 +177,12 @@ def grounded_fallback(items):
 
 
 def finish_answer(answer, items):
-    """Keep news grounding checks without appending citation markers or links."""
+    """Keep grounding checks while returning clean conversational text."""
     from trump_persona import unsupported_personal_claim
-    urls = re.findall(r'https?://[^\\s<>\\])]+', answer)
+    urls = re.findall(r'https?://[^\s<>\])]+', answer)
     allowed = {item.url for item in items}
     if unsupported_personal_claim(answer) or any(url.rstrip('.,؛') not in allowed for url in urls):
         answer = 'طبق گزارش‌های موجود، ' + '؛ '.join(
             item.publisher + ': ' + item.title for item in items[:3])
-    # The model may emit numbered source references even when not requested.
-    answer = re.sub(r'\\s*\\[(?:\\d+)(?:\\s*[,،-]\\s*\\d+)*\\]', '', answer)
+    answer = re.sub(r'\s*\[(?:\d+)(?:\s*[,،-]\s*\d+)*\]', '', answer)
     return answer.strip()
