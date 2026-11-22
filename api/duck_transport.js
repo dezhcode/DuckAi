@@ -91,7 +91,7 @@ async function chat(body) {
     cookies(response.headers);
     const next = response.headers.get('x-vqd-hash-1');
     if (next) { try { state.jsa = await solve(next); } catch { state.jsa = ''; } }
-    console.info('transport_chat_status', JSON.stringify({attempt:attempt+1, status:response.status, responseChallenge:!!next, proofPresent:!!state.jsa, cookies:state.cookies.size, historyCount:Array.isArray(body.history)?body.history.length:0}));
+    console.info('transport_chat_status', JSON.stringify({attempt:attempt+1, status:response.status, responseChallenge:!!next, proofPresent:!!state.jsa, cookies:state.cookies.size, contentType:response.headers.get('content-type')?.split(';')[0] || null, providerRequestIdPresent:!!(response.headers.get('x-request-id') || response.headers.get('cf-ray')), historyCount:Array.isArray(body.history)?body.history.length:0}));
     if (response.status === 200 && response.body) {
       const events = [], reader = response.body.getReader(), decoder = new TextDecoder();
       let buffer = '';
