@@ -23,14 +23,6 @@ from trump_agent import TrumpAgent
 from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
 
-def source_fallback(items):
-    """Provide verified feed headlines when Duck.ai cannot answer."""
-    if not items:
-        return None
-    headlines = [f'{item.publisher} گزارش داده: {item.title}' for item in items[:3]]
-    return 'الان ارتباط با سرویس گفتگو برقرار نیست، اما این خبرها از منابع خبری دریافت شده‌اند:\\n\\n' + '\\n'.join(headlines)
-
-
 def clean_chat_reply(text):
     """Strip provider citation markup without altering substantive reply text."""
     text = re.sub(r'<citation\\b[^>]*>\\s*</citation\\s*>', '', text, flags=re.I)
@@ -466,10 +458,6 @@ class Bot:
                         location.lineno if location else 0,
                         getattr(error, 'status', None), getattr(error, 'stage', None),
                         getattr(error, 'provider_code', None), getattr(error, 'retry_after', None))
-            fallback = source_fallback(sources) if not attachment and not draw else None
-            if fallback:
-                self.send_answer(chat_id, fallback, reply_to, session)
-                return
             if (getattr(error, 'status', None) == 418
                     and getattr(error, 'provider_code', None) == 'ERR_CHALLENGE'
                     and getattr(error, 'retry_after', None) is None):
