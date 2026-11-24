@@ -1,3 +1,4 @@
 # Core requirements for DuckAi CLI
 requests
 pillow
+upstash-box==0.4.1

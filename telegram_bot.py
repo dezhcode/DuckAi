@@ -22,6 +22,18 @@ from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
 from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
+from openclaw_tasks import OpenClawTasks
+
+OPENCLAW_STATUS = {
+    'pending': 'در انتظار تأیید تو.',
+    'running': 'در حال بررسی OpenClaw روی Upstash Box.',
+    'ready': 'درگاه OpenClaw روی Upstash Box آماده است.',
+    'not_ready': 'درگاه OpenClaw پاسخ داد، اما هنوز آماده نیست.',
+    'unreachable': 'درگاه OpenClaw در زمان بررسی در دسترس نبود.',
+    'missing': 'OpenClaw هنوز روی Upstash Box نصب نشده است.',
+    'box_error': 'اجرای بررسی در Upstash Box ممکن نشد.',
+    'cancelled': 'درخواست لغو شد.',
+}
 
 def clean_chat_reply(text):
     """Remove provider citation markup while keeping the model's answer."""
@@ -294,6 +306,7 @@ class Bot:
         self.news_reader = news_reader if news_reader is not None else NewsReader()
         self.agent = TrumpAgent(self.news_reader)
         self.store = ConversationStore()
+        self.openclaw = OpenClawTasks()
         self.sessions = {}
         self.updates = {}
         self.lock = threading.Lock()
@@ -362,6 +375,17 @@ class Bot:
             message = dict(message, **{'from': callback.get('from', {})})
         if not message or 'chat' not in message:
             return
+        if callback:
+            data = callback.get('data', '')
+            if isinstance(data, str) and data.startswith('openclaw:'):
+                self.openclaw_decision(callback, message)
+                return
+        else:
+            text = (message.get('text') or message.get('caption') or '').strip()
+            parts = text.split(maxsplit=1)
+            if parts and parts[0].split('@', 1)[0].lower() == '/agent':
+                self.openclaw_command(message, parts[1].lower() if len(parts) == 2 else '')
+                return
         if not callback and message.get('chat', {}).get('type') in ('group', 'supergroup'):
             text = (message.get('text') or message.get('caption') or '').strip()
             bot_name = os.environ.get('TELEGRAM_BOT_USERNAME', '').lstrip('@').lower()
@@ -385,6 +409,73 @@ class Bot:
                     self.store.save(*key, session)
                 except (requests.RequestException, ValueError, TypeError):
                     log.warning('conversation_save_failed')
+
+    def openclaw_command(self, message, argument):
+        if message['chat'].get('type') != 'private':
+            return
+        chat_id, reply_to = message['chat']['id'], message.get('message_id')
+        if not self.openclaw.is_owner(message):
+            self.api.send(chat_id, 'این فرمان فقط برای مالک ربات فعال است.', reply_to)
+            return
+        if not self.openclaw.enabled:
+            self.api.send(chat_id, 'اتصال OpenClaw هنوز تنظیم نشده است.', reply_to)
+            return
+        try:
+            if argument == 'status':
+                job = self.openclaw.current()
+                state = job.get('state') if job else None
+                status = OPENCLAW_STATUS.get(state, 'درخواست فعالی یا نتیجهٔ تازه‌ای وجود ندارد.')
+                self.api.send(chat_id, status, reply_to)
+                return
+            if argument == 'check':
+                job = self.openclaw.request()
+                if not job:
+                    self.api.send(chat_id, 'یک بررسی در جریان است. /agent status', reply_to)
+                    return
+                job_id = job['id']
+                buttons = {'inline_keyboard': [[
+                    {'text': 'تأیید بررسی', 'callback_data': 'openclaw:approve:' + job_id},
+                    {'text': 'لغو', 'callback_data': 'openclaw:cancel:' + job_id},
+                ]]}
+                self.api.send(chat_id, 'آمادگی OpenClaw روی Upstash Box بررسی شود؟ درخواست تا ۵ دقیقه اعتبار دارد.',
+                              reply_to, buttons)
+                return
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            log.warning('openclaw_queue_unavailable')
+            self.api.send(chat_id, 'صف OpenClaw در دسترس نیست.', reply_to)
+            return
+        self.api.send(chat_id, '/agent check درخواست بررسی\n/agent status وضعیت و نتیجه', reply_to)
+
+    def openclaw_decision(self, callback, message):
+        _, _, decision = callback['data'].partition(':')
+        action, _, job_id = decision.partition(':')
+        text = 'این تأیید معتبر نیست.'
+        job = None
+        if (action in ('approve', 'cancel') and self.openclaw.enabled
+                and self.openclaw.is_owner(message)):
+            try:
+                job = self.openclaw.decide(job_id, approve=action == 'approve')
+            except (requests.RequestException, ValueError, TypeError, KeyError):
+                log.warning('openclaw_queue_unavailable')
+                text = 'صف OpenClaw در دسترس نیست.'
+            else:
+                if job:
+                    text = ('تأیید شد. بررسی شروع شد.' if action == 'approve'
+                            else OPENCLAW_STATUS['cancelled'])
+        try:
+            self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'], 'text': text})
+        except (TelegramError, requests.RequestException, ValueError):
+            log.warning('openclaw_callback_answer_failed')
+        if not job or action != 'approve':
+            return
+
+        outcome = self.openclaw.box.check()
+        try:
+            if not self.openclaw.complete(job_id, outcome):
+                log.warning('openclaw_result_expired')
+        except (requests.RequestException, ValueError, TypeError, KeyError):
+            log.warning('openclaw_result_save_failed')
+        self.api.send(message['chat']['id'], OPENCLAW_STATUS[outcome], message.get('message_id'))
 
     def simulation_allowed(self, message):
         """Only an explicitly configured Telegram user may run live provider tests."""

@@ -22,7 +22,7 @@ class StoreTests(unittest.TestCase):
                     {'role': 'system', 'content': 'ignored'}],
                     'model': 'gpt-6-luna'})
             return 'OK'
-        with patch.object(store, '_command', side_effect=fake):
+        with patch.object(store, 'command', side_effect=fake):
             loaded = store.load(1, 2)
             self.assertEqual(loaded['history'], [{'role': 'user', 'content': 'hello'}])
             store.save(1, 2, loaded)

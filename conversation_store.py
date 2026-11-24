@@ -26,22 +26,22 @@ class ConversationStore:
         identifier = str(chat_id) + ':' + str(user_id)
         return 'trump:session:' + hashlib.sha256(identifier.encode()).hexdigest()
 
-    def _command(self, args):
+    def command(self, args):
         if not self.enabled:
             return None
-        response = requests.post(self.url, json=args, headers={
-            'Authorization': 'Bearer ' + self.token,
-            'Content-Type': 'application/json'}, timeout=(2, 4))
-        response.raise_for_status()
-        body = response.json()
-        if body.get('error'):
+        with requests.post(self.url, json=args, headers={
+                'Authorization': 'Bearer ' + self.token,
+                'Content-Type': 'application/json'}, timeout=(2, 4)) as response:
+            response.raise_for_status()
+            body = response.json()
+        if not isinstance(body, dict) or body.get('error'):
             raise ValueError('Redis command failed')
         return body.get('result')
 
     def load(self, chat_id, user_id):
         if not self.enabled:
             return {}
-        raw = self._command(['GET', self._key(chat_id, user_id)])
+        raw = self.command(['GET', self._key(chat_id, user_id)])
         if not raw:
             return {}
         obj = json.loads(raw)
@@ -65,8 +65,8 @@ class ConversationStore:
                 history.append({'role': turn['role'], 'content': turn['content'][:MAX_CONTENT]})
         obj = {'history': history, 'model': session.get('model', ''),
                'news_topic': session.get('news_topic')}
-        self._command(['SET', self._key(chat_id, user_id), json.dumps(obj, ensure_ascii=False), 'EX', TTL])
+        self.command(['SET', self._key(chat_id, user_id), json.dumps(obj, ensure_ascii=False), 'EX', TTL])
 
     def clear(self, chat_id, user_id):
         if self.enabled:
-            self._command(['DEL', self._key(chat_id, user_id)])
+            self.command(['DEL', self._key(chat_id, user_id)])
