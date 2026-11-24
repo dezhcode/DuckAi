@@ -1,6 +1,7 @@
 // Node transport port of DuckAiChat's session/handshake flow.
 // Upstream protocol reference: reference/duck-protocol.ts (MIT).
 const crypto = require('crypto');
+const { buildChatRequestBody, readChatResult } = require('../reference/duck-chat');
 const { solveChallenge } = require('../jsa_jsdom');
 const BASE = 'https://duck.ai';
 // Optional authorized egress proxy. All Duck.ai requests must share the same
@@ -66,35 +67,20 @@ async function handshake() {
   })();
   try { await inFlightHandshake; } finally { inFlightHandshake = null; }
 }
-function parse(line) {
-  if (!line.startsWith('data: ')) return null;
-  const raw = line.slice(6).trim();
-  if (!raw || raw.startsWith('[')) return null;
-  let ev; try { ev = JSON.parse(raw); } catch { return null; }
-  if (ev.action === 'error') return { kind: 'error', value: 'Upstream stream error' };
-  if (typeof ev.message === 'string' && ev.message) return { kind: 'message', value: ev.message };
-  if (ev.role === 'tool-invocation') return { kind: 'tool', value: { toolName: ev.toolName, state: ev.state, toolArguments: ev.toolArguments } };
-  if (ev.role === 'ui-component' && ev.name === 'generate-image') {
-    const d = ev.data || {};
-    if (d.type === 'image-title') return { kind: 'image_title', value: String(d.title || '') };
-    if (d.type === 'image-partial' || d.status === 'partial') return { kind: 'image_partial', value: d };
-    if (d.status === 'success' && d.b64Image) return { kind: 'image', value: { b64: d.b64Image, width: d.width, height: d.height, format: d.format || 'jpeg' } };
-  }
-  return null;
-}
 async function chat(body) {
+  const payload = buildChatRequestBody({
+    model: body.model,
+    prompt: body.prompt || '',
+    promptExtra: body.prompt_extra,
+    history: Array.isArray(body.history) ? body.history : [],
+    images: Array.isArray(body.images) ? body.images : [],
+    tools: body.use_tools !== false,
+    draw: body.draw,
+  });
   let lastStatus = 502;
   let lastProviderCode = null;
   for (let attempt = 0; attempt < 2; attempt++) {
     if (attempt || !state.feVersion || !state.jsa) await handshake();
-    const model = body.model || 'gpt-6-luna';
-    const payload = { model,
-      messages: [...(Array.isArray(body.history) ? body.history : []),
-        { role: 'user', content: [{ type: 'text', text: (body.prompt || '') + (body.prompt_extra || '') }, ...(body.images || [])] }],
-      canUseTools: body.use_tools !== false && model !== 'mistral-small-2603',
-      reasoningEffort: model === 'tinfoil/gpt-oss-120b' ? 'low' : 'none',
-      canUseApproxLocation: null, canDelegateImageGeneration: null, canShowGreeting: false };
-    if (body.draw) payload.metadata = { toolChoice: { GenerateImage: true } };
     const response = await duckFetch(BASE + '/duckchat/v1/chat', { method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', Origin: BASE,
         Referer: BASE + '/', 'User-Agent': UA, 'Accept-Language': 'en-US,en;q=0.9',
@@ -107,17 +93,7 @@ async function chat(body) {
     if (next) { try { state.jsa = await solve(next); } catch { state.jsa = ''; } }
     console.info('transport_chat_status', JSON.stringify({attempt:attempt+1, status:response.status, responseChallenge:!!next, proofPresent:!!state.jsa, cookies:state.cookies.size, contentType:response.headers.get('content-type')?.split(';')[0] || null, providerRequestIdPresent:!!(response.headers.get('x-request-id') || response.headers.get('cf-ray')), historyCount:Array.isArray(body.history)?body.history.length:0}));
     if (response.status === 200 && response.body) {
-      const events = [], reader = response.body.getReader(), decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { value, done } = await reader.read(); if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n'); buffer = lines.pop();
-        for (const line of lines) { const ev = parse(line.trim()); if (ev) events.push(ev); }
-      }
-      if (buffer) { const ev = parse(buffer.trim()); if (ev) events.push(ev); }
-      if (events.some(e => e.kind === 'error')) return { ok: false, status: 502, code: 'STREAM_ERROR' };
-      return { ok: true, events };
+      return readChatResult(response.body);
     }
     lastStatus = response.status;
     if (lastStatus === 418) {
