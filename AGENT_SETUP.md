@@ -29,6 +29,8 @@ In a private chat, the owner writes a request after `/agent`. Duck.ai proposes o
 
 For example, send `/agent یک فایل Plan.txt بساز و در آن بنویس سلام`, `/agent محتوای Plan.txt را نشان بده`, or `/agent فایل‌های پوشه را فهرست کن`. OpenClaw uses the dedicated `duckai-agent-files` folder in the Box home directory for `.txt`, `.md`, `.json`, and `.csv` files up to 4 KB each. File creation requires a new name. `/agent check` still runs the readiness check directly after confirmation. Duck.ai receives the owner's request to propose the task. The bot returns file results directly to the owner.
 
+When Duck.ai is unavailable, the bot recognizes the explicit file requests above and identifies those proposals as directly parsed. The same approval button is required before execution.
+
 1. Create a free, standard Box with the Debian Node runtime and Keep Alive off. Use a dedicated Box for the bot. Copy its ID and create a Box API key in the Upstash Console. [Box quickstart](https://upstash.com/docs/box/overall/quickstart)
 2. Open the Box shell and install OpenClaw. The command below installs it under the Box user's home directory. The readiness task starts the Gateway on loopback when needed and stops the process it started. This task uses no model calls. [OpenClaw Gateway options](https://docs.openclaw.ai/cli/gateway/running)
 

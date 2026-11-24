@@ -26,7 +26,7 @@ class handler(BaseHTTPRequestHandler):
                            'features': ['text', 'image-understanding', 'image-generation', 'natural-image-requests',
                                         'simulated-trump-persona', 'sourced-recent-news', 'approved-openclaw-box',
                                         'duckai-approved-plans'],
-                           'version': '2.7.0'})
+                           'version': '2.7.1'})
 
     def do_POST(self):
         if not authorized(TOKEN, self.headers.get('X-Telegram-Bot-Api-Secret-Token', '')):

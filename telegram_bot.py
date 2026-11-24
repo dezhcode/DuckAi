@@ -22,7 +22,10 @@ from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
 from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
-from openclaw_plan import MAX_PLAN_CHARS, MAX_REQUEST_CHARS, PlanError, describe_plan, parse_plan, plan_prompt, validate_plan
+from openclaw_plan import (
+    MAX_PLAN_CHARS, MAX_REQUEST_CHARS, PlanError, describe_plan, explicit_file_plan,
+    parse_plan, plan_prompt, validate_plan,
+)
 from openclaw_tasks import OpenClawTasks
 
 OPENCLAW_STATUS = {
@@ -74,6 +77,10 @@ def authorized(token, supplied):
 
 
 class UserInputError(ValueError):
+    pass
+
+
+class DuckPlanningUnavailable(UserInputError):
     pass
 
 
@@ -434,6 +441,7 @@ class Bot:
                           '/agent check بررسی درگاه\n/agent status وضعیت آخرین درخواست', reply_to)
             return
         try:
+            explanation = ''
             if argument.lower() == 'status':
                 job = self.openclaw.current()
                 state = job.get('state') if job else None
@@ -443,7 +451,13 @@ class Bot:
             if argument.lower() == 'check':
                 job = self.openclaw.request()
             else:
-                plan = self.plan_openclaw_request(argument)
+                try:
+                    plan = self.plan_openclaw_request(argument)
+                except DuckPlanningUnavailable:
+                    plan = explicit_file_plan(argument)
+                    if plan is None:
+                        raise
+                    explanation = 'Duck.ai در دسترس نیست. طرح زیر مستقیم از دستور روشن تو ساخته شد.\n\n'
                 if plan['action'] == 'clarify':
                     self.api.send(chat_id, plan['message'], reply_to)
                     return
@@ -458,7 +472,7 @@ class Bot:
                  'callback_data': 'openclaw:approve:' + job_id},
                 {'text': 'لغو', 'callback_data': 'openclaw:cancel:' + job_id},
             ]]}
-            self.api.send(chat_id, describe_plan(approved_plan) + '\n\nفرصت تأیید ۵ دقیقه است.',
+            self.api.send(chat_id, explanation + describe_plan(approved_plan) + '\n\nفرصت تأیید ۵ دقیقه است.',
                           reply_to, buttons)
         except UserInputError as error:
             self.api.send(chat_id, str(error), reply_to)
@@ -474,7 +488,7 @@ class Bot:
             raise UserInputError('درخواست را در حداکثر ۲۰۰۰ نویسه بنویس.')
         remaining = max(math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining())
         if remaining > 0:
-            raise UserInputError(self.limit_message(remaining))
+            raise DuckPlanningUnavailable(self.limit_message(remaining))
         if not self.ai_gate.acquire(timeout=2):
             raise UserInputError('Duck.ai مشغول است. کمی بعد دوباره تلاش کن.')
         try:
@@ -489,10 +503,17 @@ class Bot:
                         parts.append(text)
             return parse_plan(''.join(parts))
         except (DuckAIError, requests.RequestException) as error:
-            if getattr(error, 'status', None) == 429:
+            status = getattr(error, 'status', None)
+            limited = getattr(error, 'provider_code', None) == 'ERR_BN_LIMIT'
+            if status == 429:
                 self.shared_cooldown.set(getattr(error, 'retry_after', None) or 30)
-            log.warning('openclaw_duck_planning_failed type=%s', type(error).__name__)
-            raise UserInputError('Duck.ai فعلاً نتوانست درخواست را آماده کند. کمی بعد دوباره تلاش کن.') from error
+            log.warning('openclaw_duck_planning_failed type=%s status=%s bn_limit=%s',
+                        type(error).__name__, status, limited)
+            if limited or status == 429:
+                message = 'Duck.ai درخواست را به دلیل محدودیت سرویس رد کرد. دستور روشن فایل بفرست یا بعداً دوباره امتحان کن.'
+            else:
+                message = 'Duck.ai فعلاً نتوانست درخواست را آماده کند. کمی بعد دوباره تلاش کن.'
+            raise DuckPlanningUnavailable(message) from error
         finally:
             self.ai_gate.release()
 

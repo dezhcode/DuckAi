@@ -7,6 +7,11 @@ MAX_REQUEST_CHARS = 2000
 MAX_PLAN_CHARS = 9000
 MAX_FILE_BYTES = 4096
 FILENAME = re.compile(r'[\w][\w .()\-\u200c]{0,78}\.(?:txt|md|json|csv)', re.IGNORECASE)
+CREATE_REQUEST = re.compile(
+    r'(?:یک |یه )?فایل (?P<filename>[^\r\n]+?) (?:بساز|ایجاد کن) و '
+    r'(?:داخلش|توش|در آن) بنویس (?P<content>.+)', re.DOTALL)
+READ_REQUEST = re.compile(r'محتوای (?P<filename>[^\r\n]+?) (?:را|رو) نشان بده')
+LIST_REQUESTS = {'فایل‌های پوشه را نشان بده', 'فایل‌های پوشه را فهرست کن'}
 PLAN_KEYS = {
     'check': {'action'},
     'list_files': {'action'},
@@ -58,6 +63,22 @@ def unique_fields(pairs):
     if len(obj) != len(pairs):
         raise PlanError('Duplicate plan fields')
     return obj
+
+
+def explicit_file_plan(request):
+    """Recognize explicit file requests when the model is unavailable."""
+    if request in LIST_REQUESTS:
+        return {'action': 'list_files'}
+    create = CREATE_REQUEST.fullmatch(request)
+    read = READ_REQUEST.fullmatch(request) if not create else None
+    if not create and not read:
+        return None
+    try:
+        if create:
+            return validate_plan({'action': 'create_file', **create.groupdict()})
+        return validate_plan({'action': 'read_file', **read.groupdict()})
+    except (PlanError, UnicodeError):
+        return None
 
 
 def validate_plan(plan, *, allow_clarify=False):

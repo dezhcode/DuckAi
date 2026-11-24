@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from openclaw_box import BOX_API_URL, CHECK_COMMAND, OpenClawBox
 from openclaw_tasks import OpenClawTasks, TRANSITION
-from telegram_bot import Bot, TelegramError
+from telegram_bot import Bot, DuckAIError, TelegramError
 
 OWNER = 12345
 JOB = 'u7Z40_mocvRogfP2'
@@ -125,6 +125,32 @@ class OpenClawBotTests(unittest.TestCase):
                 self.assertEqual(len(self.api.send.call_args.args), 3)
         self.queue.request.assert_not_called()
         self.queue.box.execute.assert_not_called()
+
+    def test_provider_limit_still_proposes_the_owners_explicit_file_request(self):
+        request = self.message(text='/agent یک فایل Plan.txt بساز و داخلش بنویس سلام')
+        self.bot.response_events = Mock(side_effect=DuckAIError(
+            'Provider rejected the request', status=418, stage='chat', provider_code='ERR_BN_LIMIT'))
+        plan = {'action': 'create_file', 'filename': 'Plan.txt', 'content': 'سلام'}
+        self.queue.request.return_value = {'id': JOB, 'state': 'pending', 'plan': plan}
+        self.bot.handle_update({'message': request})
+        self.queue.request.assert_called_once_with(plan)
+        self.queue.box.execute.assert_not_called()
+        sent = self.api.send.call_args.args
+        self.assertIn('مستقیم از دستور', sent[1])
+        self.assertIn(plan['content'], sent[1])
+        approval = sent[3]['inline_keyboard'][0][0]['callback_data']
+        self.queue.decide.return_value = {'id': JOB, 'state': 'running', 'plan': plan}
+        self.queue.box.execute.return_value = ('done', 'فایل ساخته شد.')
+        self.click(approval, request)
+        self.queue.box.execute.assert_called_once_with(plan)
+
+    def test_provider_limit_rejects_an_outside_workspace_filename(self):
+        self.bot.response_events = Mock(side_effect=DuckAIError(
+            'Provider rejected the request', status=418, stage='chat', provider_code='ERR_BN_LIMIT'))
+        self.bot.handle_update({'message': self.message(text='/agent محتوای ../other.txt را نشان بده')})
+        self.queue.request.assert_not_called()
+        self.queue.box.execute.assert_not_called()
+        self.assertIn('محدودیت سرویس', self.api.send.call_args.args[1])
 
 
 class OpenClawQueueTests(unittest.TestCase):
