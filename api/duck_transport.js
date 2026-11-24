@@ -91,7 +91,7 @@ async function chat(body) {
     const payload = { model,
       messages: [...(Array.isArray(body.history) ? body.history : []),
         { role: 'user', content: [{ type: 'text', text: (body.prompt || '') + (body.prompt_extra || '') }, ...(body.images || [])] }],
-      canUseTools: model !== 'mistral-small-2603',
+      canUseTools: body.use_tools !== false && model !== 'mistral-small-2603',
       reasoningEffort: model === 'tinfoil/gpt-oss-120b' ? 'low' : 'none',
       canUseApproxLocation: null, canDelegateImageGeneration: null, canShowGreeting: false };
     if (body.draw) payload.metadata = { toolChoice: { GenerateImage: true } };

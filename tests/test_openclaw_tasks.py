@@ -1,5 +1,7 @@
+import base64
 import json
 import os
+import shlex
 import sys
 import unittest
 from types import SimpleNamespace
@@ -93,6 +95,37 @@ class OpenClawBotTests(unittest.TestCase):
         self.queue.request.assert_not_called()
         self.queue.decide.assert_not_called()
 
+    def test_duck_proposes_exact_text_and_only_approval_executes_it(self):
+        plan = {'action': 'create_file', 'filename': 'Plan.txt', 'content': 'سلام\nWorld'}
+        message = self.message(text='/agent برایم یک Plan.txt با متن سلام و World بساز')
+        self.bot.response_events = Mock(return_value=(item for item in [('message', json.dumps(plan))]))
+        self.queue.request.return_value = {'id': JOB, 'state': 'pending', 'plan': plan}
+        self.bot.handle_update({'message': message})
+        self.assertIn('Plan.txt', self.bot.response_events.call_args.args[0])
+        self.assertFalse(self.bot.response_events.call_args.kwargs['use_tools'])
+        self.queue.request.assert_called_once_with(plan)
+        self.queue.box.execute.assert_not_called()
+        self.assertIn(plan['content'], self.api.send.call_args.args[1])
+        approval = self.api.send.call_args.args[3]['inline_keyboard'][0][0]['callback_data']
+        self.queue.decide.side_effect = [{'id': JOB, 'state': 'running', 'plan': plan}, None]
+        self.queue.box.execute.return_value = ('done', 'فایل ساخته شد.')
+        self.click(approval, message)
+        self.click(approval, message)
+        self.queue.box.execute.assert_called_once_with(plan)
+        self.queue.complete.assert_called_once_with(JOB, 'done')
+
+    def test_unsupported_plans_never_get_approval_buttons(self):
+        self.bot.response_events = Mock(side_effect=lambda *a, **kw: (
+            item for item in [('message', json.dumps(self.returned_plan))]))
+        for plan in ({'action': 'exec', 'command': 'echo hi'},
+                     {'action': 'read_file', 'filename': '../secret.txt'}):
+            with self.subTest(plan=plan):
+                self.returned_plan = plan
+                self.bot.handle_update({'message': self.message(text='/agent یک کار انجام بده')})
+                self.assertEqual(len(self.api.send.call_args.args), 3)
+        self.queue.request.assert_not_called()
+        self.queue.box.execute.assert_not_called()
+
 
 class OpenClawQueueTests(unittest.TestCase):
     def setUp(self):
@@ -159,3 +192,11 @@ class OpenClawBoxTests(unittest.TestCase):
     def test_provider_error_becomes_a_retryable_chat_result(self):
         self.sdk.Box.get.side_effect = self.sdk.BoxError('details stay private')
         self.assertEqual(self.check.check(), 'box_error')
+
+    def test_file_task_payload_is_encoded_as_data(self):
+        plan = {'action': 'create_file', 'filename': 'Plan.txt', 'content': 'سلام $(echo text)'}
+        self.box.exec.command.return_value = SimpleNamespace(status='completed', result='{"state":"done"}')
+        self.assertEqual(self.check.execute(plan), ('done', 'فایل «Plan.txt» ساخته شد.'))
+        args = shlex.split(self.box.exec.command.call_args.args[0])
+        self.assertEqual(json.loads(base64.urlsafe_b64decode(args[-2])), plan)
+        self.assertNotIn(plan['content'], self.box.exec.command.call_args.args[0])

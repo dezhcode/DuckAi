@@ -22,17 +22,23 @@ from news_reader import NewsReader, finish_answer
 from trump_agent import TrumpAgent
 from duck_search import is_web_search, sources_from_event
 from conversation_store import ConversationStore
+from openclaw_plan import MAX_PLAN_CHARS, MAX_REQUEST_CHARS, PlanError, describe_plan, parse_plan, plan_prompt, validate_plan
 from openclaw_tasks import OpenClawTasks
 
 OPENCLAW_STATUS = {
     'pending': 'در انتظار تأیید تو.',
-    'running': 'در حال بررسی OpenClaw روی Upstash Box.',
+    'running': 'درخواست روی Upstash Box در حال اجراست.',
     'ready': 'درگاه OpenClaw روی Upstash Box آماده است.',
     'not_ready': 'درگاه OpenClaw پاسخ داد، اما هنوز آماده نیست.',
     'unreachable': 'درگاه OpenClaw در زمان بررسی در دسترس نبود.',
     'missing': 'OpenClaw هنوز روی Upstash Box نصب نشده است.',
-    'box_error': 'اجرای بررسی در Upstash Box ممکن نشد.',
+    'box_error': 'اجرای درخواست در Upstash Box ممکن نشد.',
     'cancelled': 'درخواست لغو شد.',
+    'done': 'درخواست انجام شد.',
+    'file_missing': 'این فایل در پوشهٔ ایجنت پیدا نشد.',
+    'file_exists': 'فایلی با همین نام وجود دارد. نام تازه‌ای بفرست.',
+    'file_unavailable': 'دسترسی به این فایل متنی ممکن نشد.',
+    'file_too_large': 'فایل برای نمایش در تلگرام بزرگ‌تر از حد مجاز است.',
 }
 
 def clean_chat_reply(text):
@@ -119,6 +125,7 @@ class NodeDuckTransport:
             'images': options.get('images') or [],
             'draw': bool(options.get('draw')),
             'prompt_extra': options.get('prompt_extra', ''),
+            'use_tools': options.get('use_tools', True),
         }
         with self.s.post(self.url, json=payload, headers={'x-duckai-transport': secret},
                          timeout=(8, 110)) as response:
@@ -384,7 +391,7 @@ class Bot:
             text = (message.get('text') or message.get('caption') or '').strip()
             parts = text.split(maxsplit=1)
             if parts and parts[0].split('@', 1)[0].lower() == '/agent':
-                self.openclaw_command(message, parts[1].lower() if len(parts) == 2 else '')
+                self.openclaw_command(message, parts[1] if len(parts) == 2 else '')
                 return
         if not callback and message.get('chat', {}).get('type') in ('group', 'supergroup'):
             text = (message.get('text') or message.get('caption') or '').strip()
@@ -420,31 +427,74 @@ class Bot:
         if not self.openclaw.enabled:
             self.api.send(chat_id, 'اتصال OpenClaw هنوز تنظیم نشده است.', reply_to)
             return
+        if not argument:
+            self.api.send(chat_id, 'درخواستت را بعد از /agent بنویس. مثلاً\n'
+                          '/agent فایل‌های پوشه را نشان بده\n'
+                          '/agent یک فایل Plan.txt بساز و در آن بنویس سلام\n'
+                          '/agent check بررسی درگاه\n/agent status وضعیت آخرین درخواست', reply_to)
+            return
         try:
-            if argument == 'status':
+            if argument.lower() == 'status':
                 job = self.openclaw.current()
                 state = job.get('state') if job else None
                 status = OPENCLAW_STATUS.get(state, 'درخواست فعالی یا نتیجهٔ تازه‌ای وجود ندارد.')
                 self.api.send(chat_id, status, reply_to)
                 return
-            if argument == 'check':
+            if argument.lower() == 'check':
                 job = self.openclaw.request()
-                if not job:
-                    self.api.send(chat_id, 'یک بررسی در جریان است. /agent status', reply_to)
+            else:
+                plan = self.plan_openclaw_request(argument)
+                if plan['action'] == 'clarify':
+                    self.api.send(chat_id, plan['message'], reply_to)
                     return
-                job_id = job['id']
-                buttons = {'inline_keyboard': [[
-                    {'text': 'تأیید بررسی', 'callback_data': 'openclaw:approve:' + job_id},
-                    {'text': 'لغو', 'callback_data': 'openclaw:cancel:' + job_id},
-                ]]}
-                self.api.send(chat_id, 'آمادگی OpenClaw روی Upstash Box بررسی شود؟ درخواست تا ۵ دقیقه اعتبار دارد.',
-                              reply_to, buttons)
+                job = self.openclaw.request(plan)
+            if not job:
+                self.api.send(chat_id, 'یک درخواست باز است. وضعیت آن را با /agent status ببین.', reply_to)
                 return
+            approved_plan = validate_plan(job.get('plan', {'action': 'check'}))
+            job_id = job['id']
+            buttons = {'inline_keyboard': [[
+                {'text': 'تأیید بررسی' if approved_plan['action'] == 'check' else 'تأیید اجرا',
+                 'callback_data': 'openclaw:approve:' + job_id},
+                {'text': 'لغو', 'callback_data': 'openclaw:cancel:' + job_id},
+            ]]}
+            self.api.send(chat_id, describe_plan(approved_plan) + '\n\nفرصت تأیید ۵ دقیقه است.',
+                          reply_to, buttons)
+        except UserInputError as error:
+            self.api.send(chat_id, str(error), reply_to)
+        except PlanError:
+            self.api.send(chat_id, 'Duck.ai درخواست قابل‌اجرا نداد. یک کار و در صورت نیاز نام فایل را مشخص کن.',
+                          reply_to)
         except (requests.RequestException, ValueError, TypeError, KeyError):
             log.warning('openclaw_queue_unavailable')
             self.api.send(chat_id, 'صف OpenClaw در دسترس نیست.', reply_to)
-            return
-        self.api.send(chat_id, '/agent check درخواست بررسی\n/agent status وضعیت و نتیجه', reply_to)
+
+    def plan_openclaw_request(self, argument):
+        if len(argument) > MAX_REQUEST_CHARS:
+            raise UserInputError('درخواست را در حداکثر ۲۰۰۰ نویسه بنویس.')
+        remaining = max(math.ceil(self.ai_not_before - time.monotonic()), self.shared_cooldown.remaining())
+        if remaining > 0:
+            raise UserInputError(self.limit_message(remaining))
+        if not self.ai_gate.acquire(timeout=2):
+            raise UserInputError('Duck.ai مشغول است. کمی بعد دوباره تلاش کن.')
+        try:
+            parts, size = [], 0
+            with closing(self.response_events(plan_prompt(argument), model=DEFAULT_MODEL,
+                                              history=[], use_tools=False)) as events:
+                for kind, text in events:
+                    if kind == 'message' and isinstance(text, str):
+                        size += len(text)
+                        if size > MAX_PLAN_CHARS:
+                            raise PlanError('Plan is too long')
+                        parts.append(text)
+            return parse_plan(''.join(parts))
+        except (DuckAIError, requests.RequestException) as error:
+            if getattr(error, 'status', None) == 429:
+                self.shared_cooldown.set(getattr(error, 'retry_after', None) or 30)
+            log.warning('openclaw_duck_planning_failed type=%s', type(error).__name__)
+            raise UserInputError('Duck.ai فعلاً نتوانست درخواست را آماده کند. کمی بعد دوباره تلاش کن.') from error
+        finally:
+            self.ai_gate.release()
 
     def openclaw_decision(self, callback, message):
         _, _, decision = callback['data'].partition(':')
@@ -460,7 +510,7 @@ class Bot:
                 text = 'صف OpenClaw در دسترس نیست.'
             else:
                 if job:
-                    text = ('تأیید شد. بررسی شروع شد.' if action == 'approve'
+                    text = ('تأیید شد. اجرا شروع شد.' if action == 'approve'
                             else OPENCLAW_STATUS['cancelled'])
         try:
             self.api.call('answerCallbackQuery', {'callback_query_id': callback['id'], 'text': text})
@@ -469,13 +519,22 @@ class Bot:
         if not job or action != 'approve':
             return
 
-        outcome = self.openclaw.box.check()
+        details = ''
+        try:
+            plan = validate_plan(job.get('plan', {'action': 'check'}))
+            if plan['action'] == 'check':
+                outcome = self.openclaw.box.check()
+            else:
+                outcome, details = self.openclaw.box.execute(plan)
+        except PlanError:
+            log.warning('openclaw_stored_plan_invalid')
+            outcome = 'box_error'
         try:
             if not self.openclaw.complete(job_id, outcome):
                 log.warning('openclaw_result_expired')
         except (requests.RequestException, ValueError, TypeError, KeyError):
             log.warning('openclaw_result_save_failed')
-        self.api.send(message['chat']['id'], OPENCLAW_STATUS[outcome], message.get('message_id'))
+        self.api.send(message['chat']['id'], details or OPENCLAW_STATUS[outcome], message.get('message_id'))
 
     def simulation_allowed(self, message):
         """Only an explicitly configured Telegram user may run live provider tests."""

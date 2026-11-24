@@ -8,6 +8,7 @@ import secrets
 
 from conversation_store import ConversationStore
 from openclaw_box import BOX_OUTCOMES, OpenClawBox
+from openclaw_plan import validate_plan
 
 JOB_ID = re.compile(r'[A-Za-z0-9_-]{16}')
 OUTCOMES = (*BOX_OUTCOMES, 'box_error')
@@ -17,11 +18,12 @@ RESULT_TTL = 600
 REQUEST = """
 local current = redis.call('GET', KEYS[1])
 if current then
-    local state = cjson.decode(current).state
-    if state == 'pending' then return current end
-    if state == 'running' then
+    local job = cjson.decode(current)
+    if job.state == 'pending' then
+        if (job.plan_key or 'check') == ARGV[3] then return current end
         return false
     end
+    if job.state == 'running' then return false end
 end
 redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
 return ARGV[1]
@@ -35,6 +37,10 @@ if job.state ~= ARGV[1] or job.id ~= ARGV[3] then
     return false
 end
 job.state = ARGV[2]
+if job.state ~= 'running' then
+    job.plan = nil
+    job.plan_key = nil
+end
 local updated = cjson.encode(job)
 redis.call('SET', KEYS[1], updated, 'EX', ARGV[4])
 return updated
@@ -69,9 +75,13 @@ class OpenClawTasks:
         raw = self.store.command(['GET', self.key])
         return json.loads(raw) if raw else None
 
-    def request(self):
-        job = json.dumps({'id': secrets.token_urlsafe(12), 'state': 'pending'})
-        raw = self.store.command(['EVAL', REQUEST, '1', self.key, job, str(ACTIVE_TTL)])
+    def request(self, plan=None):
+        plan = validate_plan({'action': 'check'} if plan is None else plan)
+        plan_key = ('check' if plan['action'] == 'check' else hashlib.sha256(
+            json.dumps(plan, sort_keys=True, ensure_ascii=False).encode()).hexdigest())
+        job = json.dumps({'id': secrets.token_urlsafe(12), 'state': 'pending',
+                          'plan': plan, 'plan_key': plan_key}, ensure_ascii=False)
+        raw = self.store.command(['EVAL', REQUEST, '1', self.key, job, str(ACTIVE_TTL), plan_key])
         return json.loads(raw) if raw else None
 
     def decide(self, job_id, approve):

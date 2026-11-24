@@ -24,8 +24,9 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.respond(200, {'ok': bool(TOKEN), 'service': 'DuckAI Telegram webhook',
                            'features': ['text', 'image-understanding', 'image-generation', 'natural-image-requests',
-                                        'simulated-trump-persona', 'sourced-recent-news', 'approved-openclaw-box'],
-                           'version': '2.6.0'})
+                                        'simulated-trump-persona', 'sourced-recent-news', 'approved-openclaw-box',
+                                        'duckai-approved-plans'],
+                           'version': '2.7.0'})
 
     def do_POST(self):
         if not authorized(TOKEN, self.headers.get('X-Telegram-Bot-Api-Secret-Token', '')):

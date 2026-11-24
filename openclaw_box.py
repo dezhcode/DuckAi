@@ -1,12 +1,18 @@
-"""Run the approved readiness check in a configured Upstash Box."""
+"""Run approved OpenClaw tasks in a configured Upstash Box."""
 
+import json
 import logging
 import os
 import re
 import shlex
 
+from openclaw_plan import FILENAME, MAX_FILE_BYTES, validate_plan
+from openclaw_workspace import workspace_command
+
 log = logging.getLogger(__name__)
-BOX_OUTCOMES = ('ready', 'not_ready', 'unreachable', 'missing')
+CHECK_OUTCOMES = ('ready', 'not_ready', 'unreachable', 'missing')
+FILE_OUTCOMES = ('done', 'file_missing', 'file_exists', 'file_unavailable', 'file_too_large')
+BOX_OUTCOMES = (*CHECK_OUTCOMES, *FILE_OUTCOMES)
 BOX_API_URL = 'https://us-east-1.box.upstash.com'
 
 # Only this fixed command reaches the Box. The Gateway stays on loopback.
@@ -84,6 +90,40 @@ class OpenClawBox:
         return bool(self.api_key and re.fullmatch(r'[A-Za-z0-9_-]{1,128}', self.box_id))
 
     def check(self):
+        result = self._run(CHECK_COMMAND)
+        return result if result in CHECK_OUTCOMES else 'box_error'
+
+    def execute(self, plan):
+        plan = validate_plan(plan)
+        raw = self._run(workspace_command(plan))
+        try:
+            result = json.loads(raw) if raw and len(raw) <= 32000 else None
+            if not isinstance(result, dict):
+                return 'box_error', ''
+            state = result.get('state')
+            if state != 'done':
+                return (state if state in (*FILE_OUTCOMES, 'missing', 'unreachable') else 'box_error'), ''
+            action = plan['action']
+            data = result.get('data')
+            if action == 'create_file':
+                return 'done', 'فایل «' + plan['filename'] + '» ساخته شد.'
+            if action == 'read_file' and isinstance(data, str) and len(data.encode()) <= MAX_FILE_BYTES:
+                return 'done', 'محتوای «' + plan['filename'] + '»\n\n' + (data or '⟨فایل خالی⟩')
+            if action == 'list_files' and isinstance(data, dict):
+                names = data.get('names')
+                if (isinstance(names, list) and len(names) <= 40
+                        and all(isinstance(name, str) and FILENAME.fullmatch(name) for name in names)):
+                    if not names and not data.get('truncated'):
+                        return 'done', 'پوشهٔ ایجنت هنوز فایل متنی ندارد.'
+                    details = '\n'.join('• ' + name for name in names)
+                    if data.get('truncated'):
+                        details += '\nنتیجه به بخشی از پوشه محدود شده است.'
+                    return 'done', 'فایل‌های پوشهٔ ایجنت\n' + details
+        except (ValueError, RecursionError):
+            pass
+        return 'box_error', ''
+
+    def _run(self, command):
         from httpx import RequestError
         from upstash_box import Box, BoxError
 
@@ -92,13 +132,9 @@ class OpenClawBox:
                          base_url=BOX_API_URL, timeout=55_000) as box:
                 if box.keep_alive:
                     log.warning('openclaw_box_keep_alive_enabled')
-                    return 'box_error'
-                run = box.exec.command(CHECK_COMMAND)
+                    return ''
+                run = box.exec.command(command)
         except (BoxError, RequestError, TimeoutError, ValueError) as error:
-            log.warning('openclaw_box_check_failed type=%s', type(error).__name__)
-            return 'box_error'
-        result = run.result.strip() if isinstance(run.result, str) else ''
-        if run.status == 'completed' and result in BOX_OUTCOMES:
-            return result
-        log.warning('openclaw_box_unexpected_result')
-        return 'box_error'
+            log.warning('openclaw_box_task_failed type=%s', type(error).__name__)
+            return ''
+        return run.result.strip() if run.status == 'completed' and isinstance(run.result, str) else ''
